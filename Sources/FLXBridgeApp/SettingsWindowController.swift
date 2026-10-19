@@ -49,7 +49,7 @@ final class SettingsWindowController: NSWindowController {
         root.layer?.backgroundColor = Palette.panel.cgColor
 
         let title = label("Settings", size: 16, weight: .bold, color: Palette.text)
-        let hint = label("Start AUTO/PILOT first: its OSC input and feedback ports must match.",
+        let hint = label("Point Cuewire at any OSC API. AUTO/PILOT ports are detected automatically when available.",
                          size: 11, weight: .regular, color: Palette.muted)
 
         destinationField.stringValue = service.destination

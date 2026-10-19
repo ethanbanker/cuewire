@@ -106,6 +106,12 @@ public final class FLX4Engine {
     public var userMappings: [ControlMapping] = [] {
         didSet { rebuildMappingIndex() }
     }
+
+    /// The built-in FLX4 surface is a preset, not the product. When no DDJ-FLX4
+    /// is connected, stock routes are disabled so a generic controller's notes
+    /// and CCs cannot accidentally trigger FLX4 transport or mixer bindings.
+    /// Learned mappings keep working either way.
+    public var flx4PresetEnabled = true
     public private(set) var learnState: LearnState = .off
 
     /// True: analog controls must cross AP's confirmed value before they send
@@ -490,6 +496,10 @@ public final class FLX4Engine {
             return applyNote(mapping, pressed: isOn, velocity: value, now: now)
         }
 
+        // A controller without the FLX4 preset must never inherit its transport
+        // or mixer bindings by sharing a channel and note number.
+        guard flx4PresetEnabled else { return [] }
+
         if channel <= 1 && canonical.1 == 0x3f && !isOn {
             var effects = shift(side: Int(channel), on: false)
             effects.append(contentsOf: release(key))
@@ -636,6 +646,7 @@ public final class FLX4Engine {
         if let (mapping, fourteenBit) = mappingForCC(channel: channel, number: number) {
             return learnedCC(mapping, channel: channel, number: number, value: value, fourteenBit: fourteenBit, now: now)
         }
+        guard flx4PresetEnabled else { return [] }
         let encoder = FLX4Mapping.browserEncoder
         if channel == encoder.channel && number == encoder.cc {
             if value == 0 || value == 64 { return [] }

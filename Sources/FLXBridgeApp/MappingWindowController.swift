@@ -116,7 +116,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         let root = NSView()
 
         let title = label("OSC MAPPING", size: 10, weight: .bold, color: Palette.muted)
-        let hint = label("Learn captures the next MIDI or serial control. Saved mappings override the stock FLX4 map and can drive any destination.",
+        let hint = label("Learn captures the next MIDI or serial control. Saved mappings override any built-in preset and can drive any OSC address.",
                          size: 11, weight: .regular, color: Palette.muted)
 
         learnButton.target = self

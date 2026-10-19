@@ -11,7 +11,7 @@ final class MainViewController: NSViewController {
     private let latencyPill = PillView()
     private let startButton = NSButton(title: "Start", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "CUEWIRE")
-    private let subtitleLabel = NSTextField(labelWithString: "DDJ-FLX4  →  AUTO/PILOT")
+    private let subtitleLabel = NSTextField(labelWithString: "CONTROLLERS  →  OSC API")
     private let brandMark = BrandMark()
     private let errorLabel = NSTextField(labelWithString: "")
     private let statsLabel = NSTextField(labelWithString: "")
@@ -33,7 +33,7 @@ final class MainViewController: NSViewController {
                 .kern: 1.8,
             ])
         subtitleLabel.attributedStringValue = NSAttributedString(
-            string: "DDJ-FLX4  →  AUTO/PILOT",
+            string: "CONTROLLERS  →  OSC API",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 9.5, weight: .medium),
                 .foregroundColor: Palette.muted,
@@ -168,8 +168,9 @@ final class MainViewController: NSViewController {
 
     private func refresh() {
         let running = service.running
+        let flx4Connected = service.midiInputs.contains { MIDITransport.isFLX4($0) }
         midiPill.update(title: "MIDI",
-                        value: service.deviceConnected ? "FLX4" : "waiting",
+                        value: service.deviceConnected ? (flx4Connected ? "FLX4" : "controller") : "waiting",
                         color: service.deviceConnected ? Palette.green : Palette.amber)
         midiPill.toolTip = service.midiInputs.isEmpty
             ? "No MIDI inputs seen"

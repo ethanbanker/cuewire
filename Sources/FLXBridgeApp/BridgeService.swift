@@ -367,10 +367,12 @@ final class BridgeService {
         let nextMappings = mappings
         let nextEndpoints = endpoints
         let mirror = serialMirrorAddresses
+        let flx4Present = midi.connectedNames.contains { MIDITransport.isFLX4($0) }
         queue.async { [weak self] in
             guard let self else { return }
             self.engine.userMappings = nextMappings
             self.engine.analogPickup = self.analogPickup
+            self.engine.flx4PresetEnabled = flx4Present
             self.routingEndpoints = nextEndpoints
             self.engineMirrorAddresses = mirror
             self.drain(self.engine.start())
@@ -587,12 +589,18 @@ final class BridgeService {
 
     private func syncMIDIState() {
         let connected = midi.connectedName != nil
+        // Stock FLX4 bindings only run while an FLX4 is actually present, so a
+        // generic controller on the same channels is never mapped by accident.
+        let flx4Present = midi.connectedNames.contains { MIDITransport.isFLX4($0) }
+        queue.async { [weak self] in
+            self?.engine.flx4PresetEnabled = flx4Present
+        }
         if connected != deviceConnected {
             deviceConnected = connected
-            if connected, let name = midi.connectedName {
-                log(.info, "DDJ-FLX4 connected (\(name))")
+            if let name = midi.connectedName {
+                log(.info, "MIDI controller connected (\(name))")
             } else {
-                log(.warn, "DDJ-FLX4 disconnected; waiting")
+                log(.warn, "MIDI controller disconnected; waiting")
             }
         }
         notify()
@@ -601,15 +609,17 @@ final class BridgeService {
     private func logMIDIDiscovery() {
         if !midi.connectedNames.isEmpty {
             log(.info, "MIDI input in use: \(midi.connectedNames.joined(separator: ", "))")
+            let hasFLX4 = midi.connectedNames.contains { MIDITransport.isFLX4($0) }
+            if !hasFLX4 { return }
             if let output = midi.outputNames.first(where: { MIDITransport.isFLX4($0) }) {
                 log(.info, "MIDI output in use: \(output)")
             } else {
                 log(.warn, "No FLX4 MIDI output found; LEDs and the keepalive will not be sent")
             }
         } else if midi.inputNames.isEmpty {
-            log(.warn, "No MIDI inputs found; waiting for a DDJ-FLX4")
+            log(.warn, "No MIDI inputs found; waiting for a controller")
         } else {
-            log(.warn, "Waiting for a MIDI input named \"DDJ-FLX4\". Inputs seen: \(midi.inputNames.joined(separator: ", "))")
+            log(.warn, "MIDI inputs seen but none opened: \(midi.inputNames.joined(separator: ", "))")
         }
     }
 

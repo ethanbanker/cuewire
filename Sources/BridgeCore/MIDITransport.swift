@@ -43,8 +43,10 @@ public func midiDisplayName(_ endpoint: MIDIEndpointRef) -> String {
     return name as String
 }
 
-/// CoreMIDI connection to a DDJ-FLX4. Sources/destinations are matched by name so
-/// the app reconnects on its own when the controller is plugged in.
+/// CoreMIDI connection for controllers. Every MIDI source is opened, so any
+/// keyboard, pad grid, fader bank or custom controller can be learned into a
+/// mapping. The FLX4 preset is only used when a device name contains "FLX4",
+/// and only an FLX4 destination receives LED output.
 public final class MIDITransport {
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
@@ -136,7 +138,7 @@ public final class MIDITransport {
         // Only touch endpoints that actually changed. Disconnecting and
         // reconnecting live sources on every scan (including each CoreMIDI
         // notification) loses virtual and hot-plugged inputs.
-        let wanted = sources.filter { MIDITransport.isFLX4(midiDisplayName($0)) }
+        let wanted = sources
         for source in connected where !wanted.contains(source) {
             MIDIPortDisconnectSource(inputPort, source)
         }

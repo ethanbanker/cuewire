@@ -727,6 +727,36 @@ do {
 }
 
 do {
+    // Any controller can be learned and mapped. Its notes/CCs must not inherit
+    // the FLX4 preset unless an FLX4 is actually connected.
+    let generic = FLX4Engine()
+    generic.flx4PresetEnabled = false
+    let loaded = OSCMessage("/AutoPilot/Deck/1/PlayerType", [.string("track")])
+    _ = generic.handle(packet: .message(loaded))
+    check(osc(generic.handle(midi: [0x90, 11, 127])).isEmpty,
+          "without the FLX4 preset a stock PLAY note is inert")
+    check(osc(generic.handle(midi: [0xb0, 0x13, 0x40, 0xb0, 0x33, 0x00])).isEmpty,
+          "without the FLX4 preset a stock channel fader is inert")
+
+    generic.userMappings = [ControlMapping(source: .midiNote, channel: 0, number: 20,
+                                           address: "/AutoPilot/Deck/1/PlayPause", mode: .trigger)]
+    equal(osc(generic.handle(midi: [0x90, 20, 127])).first?.0,
+          "/AutoPilot/Deck/1/PlayPause", "a learned mapping works on a generic controller")
+
+    generic.beginLearn(.midi)
+    let captured = learned(generic.handle(midi: [0xb2, 0x15, 0x40]))
+    equal(captured?.number, 21, "learn captures a generic controller CC")
+    generic.cancelLearn()
+    check(osc(generic.handle(midi: [0x80, 11, 0])).isEmpty,
+          "releasing an inert stock press stays silent")
+
+    let flx4 = FLX4Engine()
+    _ = flx4.handle(packet: .message(loaded))
+    equal(osc(flx4.handle(midi: [0x90, 11, 127])).first?.0,
+          "/AutoPilot/Deck/1/PlayPause", "the preset is on by default for an FLX4")
+}
+
+do {
     let engine = FLX4Engine()
     engine.userMappings = [ControlMapping(source: .midiNote, channel: 0, number: 20,
                                           address: "/AutoPilot/Deck/1/Cue", mode: .momentary)]
