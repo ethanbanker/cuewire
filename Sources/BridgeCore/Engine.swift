@@ -19,7 +19,7 @@ public struct ControlID: Hashable, Sendable {
 
 public enum EngineEffect: Equatable, Sendable {
     case osc(OSCMessage)
-    /// Send to one extra hub destination instead of AUTO/PILOT.
+    /// Send to one extra hub destination instead of Syndicate.
     case oscTo(OSCMessage, UUID)
     case midi([UInt8])
     case log(LogLevel, String)
@@ -114,7 +114,7 @@ public final class FLX4Engine {
     public var flx4PresetEnabled = true
     public private(set) var learnState: LearnState = .off
 
-    /// True: analog controls must cross AP's confirmed value before they send
+    /// True: analog controls must cross Syndicate's confirmed value before they send
     /// (soft takeover). False: every movement sends the knob/fader's physical
     /// position immediately, the way rekordbox and Serato behave. The engine
     /// defaults to pickup; the app turns it off unless the user asks for it.
@@ -157,7 +157,7 @@ public final class FLX4Engine {
             }
         }
         for deck in 0..<4 {
-            register("/AutoPilot/Deck/\(deck + 1)/PlayerType", .text)
+            register("/Syndicate/Deck/\(deck + 1)/PlayerType", .text)
         }
     }
 
@@ -232,16 +232,31 @@ public final class FLX4Engine {
         guard let mapping = mappingByControl[message.address.lowercased()], mapping.enabled else {
             return []
         }
+        // A serial switch sends 1 on press and 0 on release. A command or a
+        // toggle is one gesture per press, so the release must not fire again:
+        // without this, one click of the board's knob switch advanced two menu
+        // levels or flipped a toggle straight back.
+        let isRelease = Self.isRelease(message)
         switch mapping.mode {
         case .passthrough:
             return emit(mapping, message.arguments, address: message.address)
         case .trigger:
-            return emit(mapping, [.int(1)])
+            return isRelease ? [] : emit(mapping, [.int(1)])
         case .toggle:
-            return toggleMapping(mapping, now: now)
+            return isRelease ? [] : toggleMapping(mapping, now: now)
         case .relative:
             let delta = message.firstInt ?? Int32(message.firstFloat ?? 0)
             guard delta != 0 else { return [] }
+            // A browser wheel is two routes, not one parameter: forward one
+            // trigger per detent to the route for that direction. Without a
+            // reverse address the delta itself is the value, which is what a
+            // tempo nudge or any signed parameter expects.
+            if let reverse = mapping.reverseAddress?.trimmingCharacters(in: .whitespaces),
+               !reverse.isEmpty {
+                let target = delta > 0 ? mapping.resolvedAddress() : mapping.resolved(reverse)
+                let steps = Int(delta > 0 ? delta : -delta)
+                return (0..<steps).flatMap { _ in emit(mapping, [.int(1)], address: target) }
+            }
             return emit(mapping, [.int(delta)])
         case .absolute, .bipolar:
             let value = mapping.mode == .bipolar
@@ -253,6 +268,14 @@ public final class FLX4Engine {
             guard let value = serialValue(message) else { return [] }
             return emit(mapping, [.int(value >= 0.5 ? 1 : 0)])
         }
+    }
+
+    /// True when a press/release control reports an explicit zero. A message
+    /// carrying no number, or a partial value such as 0.4, is not a release.
+    private static func isRelease(_ message: OSCMessage) -> Bool {
+        if let value = message.firstInt { return value == 0 }
+        if let value = message.firstFloat { return value == 0 }
+        return false
     }
 
     private func serialValue(_ message: OSCMessage) -> Double? {
@@ -315,9 +338,9 @@ public final class FLX4Engine {
         if let pending = pendingToggles[key] {
             if now.timeIntervalSince(pending.at) >= 1 {
                 pendingToggles.removeValue(forKey: key)
-                return warnOnce("\(address): toggle blocked waiting for AP confirmation; enable its subscription and press again.")
+                return warnOnce("\(address): toggle blocked waiting for Syndicate confirmation; enable its subscription and press again.")
             }
-            return warnOnce("\(address): toggle blocked; waiting for AP confirmation of the last press.")
+            return warnOnce("\(address): toggle blocked; waiting for Syndicate confirmation of the last press.")
         }
         guard let current = values[key] ?? observedSwitchValue(address) else {
             return warnOnce("\(address): toggle blocked; no confirmed feedback for this route.")
@@ -348,9 +371,9 @@ public final class FLX4Engine {
             effects.append(contentsOf: modeFeedback(side))
             effects.append(contentsOf: refreshLEDs(side))
         }
-        // Ask AP to republish everything it has. Without this the first seconds
+        // Ask Syndicate to republish everything it has. Without this the first seconds
         // after launch have no switch/LED state and pickup stays blocked.
-        effects.append(contentsOf: send("/AutoPilot/Feedback/Resend", .int(1)))
+        effects.append(contentsOf: send("/Syndicate/Feedback/Resend", .int(1)))
         return effects
     }
 
@@ -613,7 +636,7 @@ public final class FLX4Engine {
 
     private func button(key: NoteKey, channel: UInt8, raw: UInt8, now: Date) -> [EngineEffect] {
         guard let rule = FLX4Mapping.buttons.first(where: { $0.channel == channel && $0.note == raw }) else {
-            return warnOnce("DDJ-FLX4 note \(raw) on channel \(channel) has no AUTO/PILOT route; ignored")
+            return warnOnce("DDJ-FLX4 note \(raw) on channel \(channel) has no Syndicate route; ignored")
         }
         let side = rule.side
         let deck = selected[side]
@@ -667,7 +690,7 @@ public final class FLX4Engine {
         let previous = positions.updateValue(full, forKey: key)
         guard previous != full else { return [] }
         guard let rule = FLX4Mapping.analog.first(where: { $0.channel == channel && $0.cc == base }) else {
-            return warnOnce("DDJ-FLX4 CC \(base) on channel \(channel) has no AUTO/PILOT route; ignored")
+            return warnOnce("DDJ-FLX4 CC \(base) on channel \(channel) has no Syndicate route; ignored")
         }
         let side = rule.side
         let deck = selected[side]
@@ -679,20 +702,12 @@ public final class FLX4Engine {
         let position = Double(full) / 16383.0
         let owner = "cc:\(channel):\(base)"
 
-        // The FLX4 filter knob is one physical centre-detent control, while
-        // AUTO/PILOT exposes separate low-pass and high-pass parameters.
-        // Shift keeps the old direct Filter2 route.
-        if rule.oneKnobFilter && !(shifts[side] && rule.shiftedAddress != nil) {
-            return oneKnobFilter(rule: rule, key: key, owner: owner,
-                                 position: position, previous: previous, deck: deck)
-        }
-
         if analogPickup {
             if !rule.direct && !controlOwned(owner, address) {
                 captured.remove(identity)
             }
             if !rule.direct && controlPending(owner, address) {
-                return warnOnce("Pickup waiting at \(address): another control wrote it; waiting for AP feedback")
+                return warnOnce("Pickup waiting at \(address): another control wrote it; waiting for Syndicate feedback")
             }
             if !rule.direct && !captured.contains(identity) {
                 guard let confirmed = values[address.lowercased()] else {
@@ -718,62 +733,6 @@ public final class FLX4Engine {
         return send(address, .float(Float(output)))
     }
 
-    /// Split one physical centre-detent filter knob across AUTO/PILOT's separate
-    /// low-pass and high-pass parameters. Centre sends 0 to both; the left half
-    /// raises Filter1 (low-pass), the right half raises Filter2 (high-pass).
-    private func oneKnobFilter(rule: AnalogRule, key: CCKey, owner: String,
-                               position: Double, previous: UInt16?, deck: Int) -> [EngineEffect] {
-        let lowRoute = FLX4Mapping.resolved(rule.address, deck: deck)
-        let highRoute = FLX4Mapping.resolved(rule.shiftedAddress ?? rule.address, deck: deck)
-        let lowTarget = routed(lowRoute, deck: deck)
-        let highTarget = routed(highRoute, deck: deck)
-        guard let lowAddress = lowTarget.address, let highAddress = highTarget.address else {
-            return lowTarget.effects + highTarget.effects
-        }
-        if analogPickup {
-            let identity = CaptureKey(control: key, address: lowAddress.lowercased())
-            if !controlOwned(owner, lowAddress) || !controlOwned(owner, highAddress) {
-                captured.remove(identity)
-            }
-            if controlPending(owner, lowAddress) || controlPending(owner, highAddress) {
-                return warnOnce("Pickup waiting at \(lowAddress) / \(highAddress): another control wrote it; waiting for AP feedback")
-            }
-            if !captured.contains(identity) {
-                guard let lowConfirmed = values[lowAddress.lowercased()],
-                      let highConfirmed = values[highAddress.lowercased()] else {
-                    let missing = values[lowAddress.lowercased()] == nil ? lowAddress : highAddress
-                    return warnOnce("Pickup blocked at \(missing): enable OSC feedback for this route")
-                }
-                // Reconstruct the knob position represented by AP's two filters
-                // so pickup works for either half of the travel.
-                let confirmed = 0.5 + (highConfirmed - lowConfirmed) * 0.5
-                let previousPosition = Double(previous ?? UInt16((position * 16383).rounded())) / 16383.0
-                let sameSide = (previousPosition - confirmed) * (position - confirmed) > 0
-                if sameSide && abs(position - confirmed) > 2.0 / 16383.0 {
-                    return []
-                }
-                captured.insert(identity)
-            }
-        }
-        let (low, high) = FLX4Engine.splitFilter(position)
-        controlWriters[lowAddress.lowercased()] = (owner, true)
-        controlWriters[highAddress.lowercased()] = (owner, true)
-        return send(lowAddress, .float(Float(low))) + send(highAddress, .float(Float(high)))
-    }
-
-    /// Physical knob position (0…1) to (low-pass, high-pass) amounts. Both
-    /// filters are neutral at 0, so the centre sends two zeros and crossing the
-    /// centre releases the filter that was active.
-    static func splitFilter(_ position: Double) -> (low: Double, high: Double) {
-        let center = 0.5
-        let deadZone = 2.0 / 16383.0
-        if abs(position - center) <= deadZone { return (0, 0) }
-        if position < center {
-            return (min(1, (center - position) * 2), 0)
-        }
-        return (0, min(1, (position - center) * 2))
-    }
-
     private enum RouteResolution {
         case found(address: String, route: String)
         case unavailable(String)
@@ -781,8 +740,8 @@ public final class FLX4Engine {
     }
 
     private func resolve(_ route: String, deck: Int) -> RouteResolution {
-        guard route.hasPrefix("/AutoPilot/Deck/") else { return .found(address: route, route: route) }
-        let rest = route.dropFirst("/AutoPilot/Deck/".count)
+        guard route.hasPrefix("/Syndicate/Deck/") else { return .found(address: route, route: route) }
+        let rest = route.dropFirst("/Syndicate/Deck/".count)
         guard let slash = rest.firstIndex(of: "/"), let number = Int(rest[..<slash]), number >= 1, number <= 4 else {
             return .invalid(route)
         }
@@ -791,7 +750,7 @@ public final class FLX4Engine {
         guard let translated = player.route(subroute) else {
             return .unavailable("Deck \(number) (\(player.rawValue)): \(subroute) unavailable; check PlayerType feedback")
         }
-        return .found(address: "/AutoPilot/Deck/\(number)/\(translated)", route: translated)
+        return .found(address: "/Syndicate/Deck/\(number)/\(translated)", route: translated)
     }
 
     /// Resolve a deck route and hand back the warning to emit when this deck's
@@ -881,7 +840,7 @@ extension FLX4Engine {
         guard shifts.indices.contains(side), shifts[side] != on else { return [] }
         shifts[side] = on
         rearm(analogKeys(side: side, shiftedOnly: true))
-        return send("/AutoPilot/Feedback/Resend", .int(1))
+        return send("/Syndicate/Feedback/Resend", .int(1))
     }
 
     private func selectDeck(side: Int) -> [EngineEffect] {
@@ -889,7 +848,7 @@ extension FLX4Engine {
         rearm(analogKeys(side: side, shiftedOnly: false))
         var effects = modeFeedback(side)
         effects.append(contentsOf: refreshLEDs(side))
-        effects.append(contentsOf: send("/AutoPilot/Feedback/Resend", .int(1)))
+        effects.append(contentsOf: send("/Syndicate/Feedback/Resend", .int(1)))
         return effects
     }
 
@@ -929,13 +888,13 @@ extension FLX4Engine {
             if now.timeIntervalSince(pending.at) >= 1 {
                 pendingToggles.removeValue(forKey: key)
                 values.removeValue(forKey: key)
-                return send("/AutoPilot/Feedback/Resend", .int(1))
-                    + warnOnce("\(address): toggle blocked waiting for AP confirmation; enable its subscription and press again after feedback arrives.")
+                return send("/Syndicate/Feedback/Resend", .int(1))
+                    + warnOnce("\(address): toggle blocked waiting for Syndicate confirmation; enable its subscription and press again after feedback arrives.")
             }
-            return warnOnce("\(address): toggle blocked; waiting for AP confirmation of the last press.")
+            return warnOnce("\(address): toggle blocked; waiting for Syndicate confirmation of the last press.")
         }
         guard let current = values[key] else {
-            return warnOnce("\(address): toggle blocked; no confirmed AP switch feedback. Enable its subscription.")
+            return warnOnce("\(address): toggle blocked; no confirmed Syndicate switch feedback. Enable its subscription.")
         }
         let next: Int32 = current >= 0.5 ? 0 : 1
         pendingToggles[key] = (Double(next), now)
@@ -1073,7 +1032,7 @@ extension FLX4Engine {
         "cc:\(control.channel):\(control.cc)"
     }
 
-    /// Feed one AP OSC packet. Returns LED updates for the hardware.
+    /// Feed one Syndicate OSC packet. Returns LED updates for the hardware.
     public func handle(packet: OSCPacket) -> [EngineEffect] {
         var changed: [String] = []
         var effects: [EngineEffect] = []
@@ -1083,13 +1042,13 @@ extension FLX4Engine {
         guard !changed.isEmpty else { return effects }
         lastFeedback = Date()
 
-        for address in changed where address.hasPrefix("/autopilot/deck/") && address.hasSuffix("/playertype") {
+        for address in changed where address.hasPrefix("/syndicate/deck/") && address.hasSuffix("/playertype") {
             let parts = address.split(separator: "/")
             guard parts.count >= 4, let deck = Int(parts[2]), deck >= 1, deck <= 4 else { continue }
             let player = PlayerType(feedback: texts[address] ?? "")
             if players[deck - 1] != player {
                 players[deck - 1] = player
-                let tempo = "/autopilot/deck/\(deck)/temposlider"
+                let tempo = "/syndicate/deck/\(deck)/temposlider"
                 captured = captured.filter { $0.address != tempo }
             }
         }
@@ -1103,15 +1062,15 @@ extension FLX4Engine {
         return effects
     }
 
-    /// AUTO/PILOT builds differ in the OSC namespace they publish feedback on:
-    /// current builds send "/Syndicate/...", older ones "/AutoPilot/...", and the
-    /// app accepts commands under either. Fold both into one key space so feedback
-    /// from the running AP is matched either way.
+    /// Syndicate builds differ in the OSC namespace they publish feedback on:
+    /// current builds send "/Syndicate/...", pre-rename ones "/AutoPilot/...",
+    /// and the app accepts commands under either. Fold both into one key space
+    /// so feedback from the running app is matched either way.
     public static func canonical(_ address: String) -> String {
         let lower = address.lowercased()
-        let alternate = "/syndicate/"
-        guard lower.hasPrefix(alternate) else { return lower }
-        return "/autopilot/" + lower.dropFirst(alternate.count)
+        let legacy = "/autopilot/"
+        guard lower.hasPrefix(legacy) else { return lower }
+        return "/syndicate/" + lower.dropFirst(legacy.count)
     }
 
     private func accept(_ message: OSCMessage, changed: inout [String], effects: inout [EngineEffect]) {
@@ -1131,7 +1090,7 @@ extension FLX4Engine {
                 valid = false
             }
         default:
-            // AP publishes switch and meter feedback as int as well as float.
+            // Syndicate publishes switch and meter feedback as int as well as float.
             let raw: Double?
             if let value = message.firstFloat, value.isFinite {
                 raw = Double(value)
@@ -1171,7 +1130,7 @@ extension FLX4Engine {
         } else {
             values.removeValue(forKey: key)
             texts.removeValue(forKey: key)
-            effects.append(contentsOf: warnOnce("Invalid AP feedback for \(message.address); dependent controls blocked/re-armed"))
+            effects.append(contentsOf: warnOnce("Invalid Syndicate feedback for \(message.address); dependent controls blocked/re-armed"))
         }
         if !changed.contains(key) { changed.append(key) }
     }

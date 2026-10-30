@@ -51,11 +51,11 @@ public struct OSCRoute: Identifiable, Hashable, Sendable {
     public var display: String { "\(address)  —  \(label)  [\(kind.label)]" }
 }
 
-/// AUTO/PILOT's OSC surface. Command routes are curated from the bridge's
+/// Syndicate's OSC surface. Command routes are curated from the bridge's
 /// verified mapping; feedback routes are pulled from the running app's own
-/// `feedbackSubscriptions`, so the picker follows AP versions instead of
+/// `feedbackSubscriptions`, so the picker follows Syndicate versions instead of
 /// freezing an old API dump into the app.
-public enum AutoPilotCatalog {
+public enum SyndicateCatalog {
     public static let builtIn: [OSCRoute] = {
         var routes: [OSCRoute] = []
         func add(_ address: String, _ label: String, _ group: String, _ kind: RouteKind) {
@@ -63,20 +63,20 @@ public enum AutoPilotCatalog {
         }
 
         // Header / shared mixer
-        add("/AutoPilot/Header/MasterVolume", "Master volume", "Header", .continuous)
-        add("/AutoPilot/Header/CueVolume", "Headphone volume", "Header", .continuous)
-        add("/AutoPilot/Header/CueMix", "Headphone mix", "Header", .continuous)
-        add("/AutoPilot/Header/BPM", "Master BPM", "Header", .continuous)
-        add("/AutoPilot/Header/Metronome", "Metronome", "Header", .switchValue)
-        add("/AutoPilot/Header/Clock", "Clock", "Header", .text)
+        add("/Syndicate/Header/MasterVolume", "Master volume", "Header", .continuous)
+        add("/Syndicate/Header/CueVolume", "Headphone volume", "Header", .continuous)
+        add("/Syndicate/Header/CueMix", "Headphone mix", "Header", .continuous)
+        add("/Syndicate/Header/BPM", "Master BPM", "Header", .continuous)
+        add("/Syndicate/Header/Metronome", "Metronome", "Header", .switchValue)
+        add("/Syndicate/Header/Clock", "Clock", "Header", .text)
 
         // Browser
-        add("/AutoPilot/Browser/Up", "Browser up", "Browser", .trigger)
-        add("/AutoPilot/Browser/Down", "Browser down", "Browser", .trigger)
-        add("/AutoPilot/Browser/Enter", "Browser enter", "Browser", .trigger)
-        add("/AutoPilot/Browser/Back", "Browser back", "Browser", .trigger)
+        add("/Syndicate/Browser/Up", "Browser up", "Browser", .trigger)
+        add("/Syndicate/Browser/Down", "Browser down", "Browser", .trigger)
+        add("/Syndicate/Browser/Enter", "Browser enter", "Browser", .trigger)
+        add("/Syndicate/Browser/Back", "Browser back", "Browser", .trigger)
         for deck in 1...4 {
-            add("/AutoPilot/Browser/L\(deck)", "Load deck \(deck)", "Browser", .trigger)
+            add("/Syndicate/Browser/L\(deck)", "Load deck \(deck)", "Browser", .trigger)
         }
 
         // Deck transport and tools
@@ -126,18 +126,18 @@ public enum AutoPilotCatalog {
             ("SlipLoop/Four", "Slip loop 4", .trigger),
         ]
         for (route, label, kind) in deckRoutes {
-            add("/AutoPilot/Deck/{deck}/\(route)", label, "Deck · transport", kind)
+            add("/Syndicate/Deck/{deck}/\(route)", label, "Deck · transport", kind)
         }
         for cue in 1...8 {
-            add("/AutoPilot/Deck/{deck}/Cue\(cue)", "Hot cue \(cue)", "Deck · cues", .trigger)
+            add("/Syndicate/Deck/{deck}/Cue\(cue)", "Hot cue \(cue)", "Deck · cues", .trigger)
         }
         for (route, label) in [("LoopMoveBeat", "Move loop by beat"),
                                ("LoopMoveBar", "Move loop by bar")] {
-            add("/AutoPilot/Deck/{deck}/\(route)", label, "Deck · loops", .trigger)
+            add("/Syndicate/Deck/{deck}/\(route)", label, "Deck · loops", .trigger)
         }
-        add("/AutoPilot/Deck/{deck}/Sampler/Lane", "Sampler lane", "Deck · sampler", .trigger)
+        add("/Syndicate/Deck/{deck}/Sampler/Lane", "Sampler lane", "Deck · sampler", .trigger)
         for step in 1...16 {
-            add("/AutoPilot/Deck/{deck}/Sampler/Step\(step)/Enabled", "Sampler step \(step)", "Deck · sampler", .switchValue)
+            add("/Syndicate/Deck/{deck}/Sampler/Step\(step)/Enabled", "Sampler step \(step)", "Deck · sampler", .switchValue)
         }
         for (route, label) in [("Sampler/PlayPause", "Sampler play / pause"),
                                ("Sampler/PhaseBend", "Sampler phase bend"),
@@ -145,7 +145,7 @@ public enum AutoPilotCatalog {
                                ("Sampler/Speed", "Sampler speed"),
                                ("Sampler/Quantize", "Sampler quantize"),
                                ("Sampler/FaderStart", "Sampler fader start")] {
-            add("/AutoPilot/Deck/{deck}/\(route)", label, "Deck · sampler", .trigger)
+            add("/Syndicate/Deck/{deck}/\(route)", label, "Deck · sampler", .trigger)
         }
         for (route, label) in [("Clip/PlayPause", "Clip play / pause"),
                                ("Clip/Cue", "Clip cue"),
@@ -153,7 +153,7 @@ public enum AutoPilotCatalog {
                                ("Clip/PitchDown", "Clip pitch down"),
                                ("Clip/PitchUp", "Clip pitch up"),
                                ("Clip/PitchReset", "Clip pitch reset")] {
-            add("/AutoPilot/Deck/{deck}/\(route)", label, "Deck · clip", .trigger)
+            add("/Syndicate/Deck/{deck}/\(route)", label, "Deck · clip", .trigger)
         }
 
         // Mixer channels
@@ -163,14 +163,18 @@ public enum AutoPilotCatalog {
             ("EQ/Low", "EQ low", .continuous),
             ("EQ/Mid", "EQ mid", .continuous),
             ("EQ/High", "EQ high", .continuous),
-            ("Filter1", "Filter 1", .continuous),
-            ("Filter2", "Filter 2", .continuous),
+            // One nonlinear filter since Syndicate 0.2.0: Filter1 is CUTOFF
+            // (0…1, centre open), Filter2 is RES, Filter3 is WIDTH. All three
+            // are plain 0…1 values, not a -1…+1 bipolar pair.
+            ("Filter1", "Filter cutoff", .continuous),
+            ("Filter2", "Filter resonance", .continuous),
+            ("Filter3", "Filter width", .continuous),
             ("Cue", "Headphone cue", .switchValue),
             ("Mute", "Mute", .switchValue),
             ("Solo", "Solo", .switchValue),
             ("Meter", "Level meter", .meter),
         ] {
-            add("/AutoPilot/Mixer/CH{deck}/\(route)", label, "Mixer", kind)
+            add("/Syndicate/Mixer/CH{deck}/\(route)", label, "Mixer", kind)
         }
 
         // Deck feedback that is useful as a target too.
@@ -190,7 +194,7 @@ public enum AutoPilotCatalog {
             ("LoopInfo", "Loop info", .text),
             ("TempoSliderEnabled", "Tempo fader enabled", .switchValue),
         ] {
-            add("/AutoPilot/Deck/{deck}/\(route)", label, "Deck · feedback", kind)
+            add("/Syndicate/Deck/{deck}/\(route)", label, "Deck · feedback", kind)
         }
 
         return routes
@@ -201,10 +205,11 @@ public enum AutoPilotCatalog {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return value }
         if !value.hasPrefix("/") { value = "/" + value }
-        if value.lowercased().hasPrefix("/syndicate/") {
-            value = "/AutoPilot/" + value.dropFirst("/Syndicate/".count)
-        } else if value.lowercased().hasPrefix("/autopilot/") {
-            value = "/AutoPilot/" + value.dropFirst("/AutoPilot/".count)
+        let lower = value.lowercased()
+        if lower.hasPrefix("/autopilot/") {
+            value = "/Syndicate/" + value.dropFirst("/AutoPilot/".count)
+        } else if lower.hasPrefix("/syndicate/") {
+            value = "/Syndicate/" + value.dropFirst("/Syndicate/".count)
         }
         var parts = value.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard parts.first == "" else { return value }
@@ -269,7 +274,7 @@ public enum AutoPilotCatalog {
                         kind: kind ?? inferKind(template), discovered: false)
     }
 
-    public static func all(settings: AutoPilotSettings? = AutoPilotSettings.detect(),
+    public static func all(settings: SyndicateSettings? = SyndicateSettings.detect(),
                            observed: [String] = []) -> [OSCRoute] {
         var routes = builtIn
         var seen = Set(routes.map { $0.address.lowercased() })

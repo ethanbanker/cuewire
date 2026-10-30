@@ -224,6 +224,39 @@ public final class SerialTransport {
         return paths.sorted()
     }
 
+    /// Pick the device to open. A configured path wins while it is present; when
+    /// the controller has been unplugged and comes back under a different name
+    /// (or the saved path is stale) this falls back to auto-detection, so the
+    /// link recovers on its own instead of needing the setting cleared.
+    public static func resolve(configured: String, available: [String]) -> String? {
+        if !configured.isEmpty, available.contains(configured) { return configured }
+        // Falling back must not open whatever happens to be plugged in: a stray
+        // Bluetooth or debug console node is not a controller.
+        let usb = available.filter { path in
+            let lower = path.lowercased()
+            return lower.contains("usb") || lower.contains("slab")
+        }
+        return preferredPort(from: usb)
+    }
+
+    /// Identity of the device node behind `path`. A replug normally produces a
+    /// different inode/device number, which is how a still-open but dead
+    /// descriptor is told apart from a healthy one.
+    public static func deviceIdentity(_ path: String) -> UInt64? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return (UInt64(truncatingIfNeeded: info.st_rdev) << 20) ^ UInt64(truncatingIfNeeded: info.st_ino)
+    }
+
+    /// True when the descriptor we hold no longer refers to the device it was
+    /// opened on. USB serial nodes disappear on unplug, but the descriptor stays
+    /// open, so without this check the bridge never reopens the port.
+    public static func isStale(path: String?, identity: UInt64?) -> Bool {
+        guard let path, !path.isEmpty, let identity else { return true }
+        guard let current = deviceIdentity(path) else { return true }
+        return current != identity
+    }
+
     public static func preferredPort(from ports: [String]) -> String? {
         // ESP32-S3 native USB usually shows up as usbmodem; CP210x/CH340 adapters
         // show up as usbserial/wchusbserial. Prefer the native names.
@@ -234,7 +267,8 @@ public final class SerialTransport {
         return ports.count == 1 ? ports.first : nil
     }
 
-    public func start(path requested: String?, baud: Int = 115_200, framing: SerialFraming = .auto) throws {
+    public func start(path requested: String?, baud: Int = SerialTransport.defaultBaud,
+                      framing: SerialFraming = .auto) throws {
         stop()
         let path: String
         if let requested, !requested.isEmpty {
@@ -252,6 +286,7 @@ public final class SerialTransport {
         let fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard fd >= 0 else { throw posixError("Open \(path)") }
         do {
+            Self.releaseModemLines(fd)
             try configure(fd, baud: baud)
         } catch {
             close(fd)
@@ -355,8 +390,26 @@ public final class SerialTransport {
 
     private var discardedFrames = 0
 
+    /// Deassert DTR and RTS straight after opening the port.
+    ///
+    /// An ESP32 (or any board with the usual two-transistor auto-reset circuit)
+    /// holds EN/GPIO0 low while both lines are asserted, which pins the chip in
+    /// reset for as long as the port stays open: the firmware never starts, so a
+    /// controller looks dead and a display never initialises. Clearing them on
+    /// open lets the sketch run; flashing tools still drive the lines themselves.
+    private static func releaseModemLines(_ fd: Int32) {
+        var lines: Int32 = 0
+        _ = ioctl(fd, TIOCMSET, &lines)
+    }
+
+    /// macOS termios stops at 230400; faster rates need IOSSIOSPEED.
+    private static let ioctlSetSpeed = UInt(0x8004_5402)
+    /// Highest rate a plain termios call can express.
+    private static let termiosMaximum = 230_400
+
     private func configure(_ fd: Int32, baud: Int) throws {
-        guard let speed = Self.speed(baud) else {
+        let expressible = baud > Self.termiosMaximum
+        guard let speed = Self.speed(expressible ? Self.termiosMaximum : baud) else {
             throw NSError(domain: "FLXBridge", code: 4,
                           userInfo: [NSLocalizedDescriptionKey: "Unsupported serial baud rate \(baud)"])
         }
@@ -374,6 +427,12 @@ public final class SerialTransport {
         cfsetospeed(&settings, speed)
         guard tcsetattr(fd, TCSANOW, &settings) == 0 else { throw posixError("Configure serial") }
         tcflush(fd, TCIOFLUSH)
+        if expressible {
+            var rate = speed_t(baud)
+            guard ioctl(fd, Self.ioctlSetSpeed, &rate) == 0 else {
+                throw posixError("Set serial speed \(baud)")
+            }
+        }
     }
 
     private static func speed(_ baud: Int) -> speed_t? {
@@ -395,5 +454,10 @@ public final class SerialTransport {
 }
 
 extension SerialTransport {
-    public static let baudRates = [9_600, 19_200, 38_400, 57_600, 115_200, 230_400]
+    /// 921600 is the firmware's default: at 115200 a 21-byte ping costs 1.8 ms
+    /// each way, which is most of the measured round trip. 460800 is the safe
+    /// fallback for a bridge that cannot hold the higher rate.
+    public static let baudRates = [9_600, 19_200, 38_400, 57_600, 115_200, 230_400,
+                                   460_800, 921_600]
+    public static let defaultBaud = 921_600
 }

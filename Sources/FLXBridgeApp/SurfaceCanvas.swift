@@ -2,7 +2,7 @@ import AppKit
 import BridgeCore
 
 /// Schematic DDJ-FLX4 surface. Everything is drawn from the published snapshot,
-/// so a control lights up as soon as the engine reports a press or AP feedback.
+/// so a control lights up as soon as the engine reports a press or Syndicate feedback.
 final class SurfaceCanvas: NSView {
     var snapshot: SurfaceSnapshot? {
         didSet { needsDisplay = true }
@@ -84,10 +84,10 @@ final class SurfaceCanvas: NSView {
         let keyGap: CGFloat = 6
         let keyWidth = (inner.width - keyGap * 3) / 4
         let rowOne: [(String, UInt8, Bool)] = [
-            ("PLAY", 11, lit(snapshot, "/AutoPilot/Deck/\(deck + 1)/Playing")),
+            ("PLAY", 11, lit(snapshot, "/Syndicate/Deck/\(deck + 1)/Playing")),
             ("CUE", 12, false),
-            ("SYNC", 88, lit(snapshot, "/AutoPilot/Deck/\(deck + 1)/Sync")),
-            ("LOOP", 77, lit(snapshot, "/AutoPilot/Deck/\(deck + 1)/Loop")),
+            ("SYNC", 88, lit(snapshot, "/Syndicate/Deck/\(deck + 1)/Sync")),
+            ("LOOP", 77, lit(snapshot, "/Syndicate/Deck/\(deck + 1)/Loop")),
         ]
         let rowTwo: [(String, UInt8, Bool)] = [
             ("IN", 16, false), ("OUT", 17, false), ("GRID", 72, false), ("MASTER", 92, false),
@@ -111,7 +111,7 @@ final class SurfaceCanvas: NSView {
         // Tempo
         let faderTop = y + 44
         let faderHeight = max(inner.maxY - faderTop - 26, 40)
-        let tempo = value(snapshot, "/AutoPilot/Deck/\(deck + 1)/TempoSlider")
+        let tempo = value(snapshot, "/Syndicate/Deck/\(deck + 1)/TempoSlider")
         let waiting = snapshot.pickup[ControlID(kind: .cc, channel: noteChannel, number: 0)] == false
         // The FLX4 tempo fader is wired with + at the bottom, so invert the
         // handle to match the hardware and draw the fill from the centre detent.
@@ -119,7 +119,7 @@ final class SurfaceCanvas: NSView {
                   value: tempo, waiting: waiting, bipolar: true, invert: true)
         text("TEMPO", in: NSRect(x: inner.minX + 6, y: faderTop + faderHeight + 6, width: 60, height: 12),
              size: 8, weight: .semibold, color: Palette.muted)
-        // AP's TempoSlider is a ±12-semitone wide-pitch control (its own UI
+        // Syndicate's TempoSlider is a ±12-semitone wide-pitch control (its own UI
         // shows the same value), so a linear ±100% readout would be wrong
         // everywhere except centre and the ends.
         let semitones = tempo.map { ($0 * 2 - 1) * 12 }
@@ -185,19 +185,19 @@ final class SurfaceCanvas: NSView {
                 let waiting: Bool
                 var bipolar = false
                 if knob.1.isEmpty {
-                    knobValue = value(snapshot, "/AutoPilot/Header/CueMix")
+                    knobValue = value(snapshot, "/Syndicate/Header/CueMix")
                     waiting = false
                 } else if knob.1 == "Filter1" {
-                    // AP has separate low-pass (Filter1) and high-pass
+                    // Syndicate has separate low-pass (Filter1) and high-pass
                     // (Filter2) controls; the FLX4's single centre-detent knob
                     // is shown as one bipolar value.
-                    let low = value(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/Filter1") ?? 0
-                    let high = value(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/Filter2") ?? 0
+                    let low = value(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/Filter1") ?? 0
+                    let high = value(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/Filter2") ?? 0
                     knobValue = min(max(0.5 + (high - low) / 2, 0), 1)
                     waiting = snapshot.pickup[ControlID(kind: .cc, channel: 6, number: UInt8(23 + side))] == false
                     bipolar = true
                 } else {
-                    knobValue = value(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/\(knob.1)")
+                    knobValue = value(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/\(knob.1)")
                     let cc = ccFor(route: knob.1)
                     waiting = snapshot.pickup[ControlID(kind: .cc, channel: channel, number: cc)] == false
                 }
@@ -212,14 +212,14 @@ final class SurfaceCanvas: NSView {
         let faderTop = y + 8
         let faderHeight = max(rect.maxY - faderTop - 22, 40)
         drawFader(in: NSRect(x: rect.minX + 10, y: faderTop, width: 26, height: faderHeight),
-                  value: value(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/Volume"),
+                  value: value(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/Volume"),
                   waiting: snapshot.pickup[ControlID(kind: .cc, channel: channel, number: 19)] == false)
         text("VOL", in: NSRect(x: rect.minX + 4, y: faderTop + faderHeight + 4, width: 40, height: 11),
              size: 8, weight: .semibold, color: Palette.muted)
         drawMeter(in: NSRect(x: rect.minX + 52, y: faderTop, width: 10, height: faderHeight),
-                  level: value(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/Meter"))
+                  level: value(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/Meter"))
         let cuePressed = snapshot.pressed.contains(ControlID(kind: .note, channel: channel, number: 84))
-        let cueLit = lit(snapshot, "/AutoPilot/Mixer/CH\(deck + 1)/Cue")
+        let cueLit = lit(snapshot, "/Syndicate/Mixer/CH\(deck + 1)/Cue")
         let cueRect = NSRect(x: rect.minX + 78, y: faderTop + faderHeight - 30, width: 46, height: 28)
         drawKey(cueRect, label: "CUE", pressed: cuePressed, lit: cueLit)
     }

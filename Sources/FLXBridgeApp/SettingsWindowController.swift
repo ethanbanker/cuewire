@@ -13,10 +13,10 @@ final class SettingsWindowController: NSWindowController {
                                            target: nil, action: nil)
     private let pickupToggle = NSButton(checkboxWithTitle: "Soft takeover (pickup) for faders and knobs",
                                         target: nil, action: nil)
-    private let pickupHint = NSTextField(labelWithString: "Off sends the knob/fader's physical position immediately (rekordbox-style). On waits until it crosses AUTO/PILOT's value.")
+    private let pickupHint = NSTextField(labelWithString: "Off sends the knob/fader's physical position immediately (rekordbox-style). On waits until it crosses Syndicate's value.")
     private let inputsLabel = NSTextField(labelWithString: "")
-    private let autoPilotLabel = NSTextField(labelWithString: "")
-    private let useAutoPilotButton = NSButton(title: "Use AUTO/PILOT ports", target: nil, action: nil)
+    private let syndicateLabel = NSTextField(labelWithString: "")
+    private let useSyndicateButton = NSButton(title: "Use Syndicate ports", target: nil, action: nil)
     private let errorLabel = NSTextField(labelWithString: "")
     private let serialToggle = NSButton(checkboxWithTitle: "Receive OSC from a USB serial controller",
                                         target: nil, action: nil)
@@ -49,7 +49,7 @@ final class SettingsWindowController: NSWindowController {
         root.layer?.backgroundColor = Palette.panel.cgColor
 
         let title = label("Settings", size: 16, weight: .bold, color: Palette.text)
-        let hint = label("Point Cuewire at any OSC API. AUTO/PILOT ports are detected automatically when available.",
+        let hint = label("Point Cuewire at any OSC API. Syndicate ports are detected automatically when available.",
                          size: 11, weight: .regular, color: Palette.muted)
 
         destinationField.stringValue = service.destination
@@ -76,18 +76,18 @@ final class SettingsWindowController: NSWindowController {
         inputsLabel.lineBreakMode = .byTruncatingTail
         inputsLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        autoPilotLabel.font = .systemFont(ofSize: 10, weight: .regular)
-        autoPilotLabel.textColor = Palette.muted
-        autoPilotLabel.lineBreakMode = .byTruncatingTail
-        autoPilotLabel.translatesAutoresizingMaskIntoConstraints = false
-        updateAutoPilotLabel()
+        syndicateLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        syndicateLabel.textColor = Palette.muted
+        syndicateLabel.lineBreakMode = .byTruncatingTail
+        syndicateLabel.translatesAutoresizingMaskIntoConstraints = false
+        updateSyndicateLabel()
 
-        useAutoPilotButton.target = self
-        useAutoPilotButton.action = #selector(useAutoPilotPorts)
-        useAutoPilotButton.bezelStyle = .rounded
-        useAutoPilotButton.controlSize = .small
-        useAutoPilotButton.font = .systemFont(ofSize: 10, weight: .regular)
-        useAutoPilotButton.translatesAutoresizingMaskIntoConstraints = false
+        useSyndicateButton.target = self
+        useSyndicateButton.action = #selector(useSyndicatePorts)
+        useSyndicateButton.bezelStyle = .rounded
+        useSyndicateButton.controlSize = .small
+        useSyndicateButton.font = .systemFont(ofSize: 10, weight: .regular)
+        useSyndicateButton.translatesAutoresizingMaskIntoConstraints = false
 
         errorLabel.font = .systemFont(ofSize: 11, weight: .medium)
         errorLabel.textColor = Palette.red
@@ -151,7 +151,7 @@ final class SettingsWindowController: NSWindowController {
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        [title, hint, grid, autoPilotLabel, useAutoPilotButton, autoStartToggle, pickupToggle, pickupHint, midiTitle, inputsLabel,
+        [title, hint, grid, syndicateLabel, useSyndicateButton, autoStartToggle, pickupToggle, pickupHint, midiTitle, inputsLabel,
          serialTitle, serialToggle, serialRow, mirrorSerialToggle, serialHint, errorLabel, buttons].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
@@ -166,14 +166,14 @@ final class SettingsWindowController: NSWindowController {
             grid.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             grid.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 16),
 
-            autoPilotLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            autoPilotLabel.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 10),
-            autoPilotLabel.trailingAnchor.constraint(lessThanOrEqualTo: useAutoPilotButton.leadingAnchor, constant: -8),
-            useAutoPilotButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            useAutoPilotButton.centerYAnchor.constraint(equalTo: autoPilotLabel.centerYAnchor),
+            syndicateLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            syndicateLabel.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 10),
+            syndicateLabel.trailingAnchor.constraint(lessThanOrEqualTo: useSyndicateButton.leadingAnchor, constant: -8),
+            useSyndicateButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            useSyndicateButton.centerYAnchor.constraint(equalTo: syndicateLabel.centerYAnchor),
 
             autoStartToggle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            autoStartToggle.topAnchor.constraint(equalTo: autoPilotLabel.bottomAnchor, constant: 16),
+            autoStartToggle.topAnchor.constraint(equalTo: syndicateLabel.bottomAnchor, constant: 16),
             pickupToggle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             pickupToggle.topAnchor.constraint(equalTo: autoStartToggle.bottomAnchor, constant: 8),
             pickupHint.leadingAnchor.constraint(equalTo: title.leadingAnchor, constant: 18),
@@ -234,7 +234,7 @@ final class SettingsWindowController: NSWindowController {
         }
         let serialPort = serialPortPopup.indexOfSelectedItem <= 0
             ? "" : (serialPortPopup.titleOfSelectedItem ?? "")
-        let baud = Int(serialBaudPopup.titleOfSelectedItem ?? "") ?? 115_200
+        let baud = Int(serialBaudPopup.titleOfSelectedItem ?? "") ?? SerialTransport.defaultBaud
         let framingIndex = max(0, serialFramingPopup.indexOfSelectedItem)
         let framing = SerialFraming.allCases[min(framingIndex, SerialFraming.allCases.count - 1)]
         service.configure(destination: destination, destinationPort: port,
@@ -291,29 +291,29 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    @objc private func useAutoPilotPorts() {
-        guard let ap = AutoPilotSettings.detect() else {
-            fail("No AUTO/PILOT settings found at \(AutoPilotSettings.defaultPath)")
+    @objc private func useSyndicatePorts() {
+        guard let ap = SyndicateSettings.detect() else {
+            fail("No Syndicate settings found at \(SyndicateSettings.defaultPath)")
             return
         }
         if let host = ap.feedbackHost, !host.isEmpty { destinationField.stringValue = host }
         if let listen = ap.listenPort { portField.stringValue = String(listen) }
         if let feedback = ap.feedbackPort { feedbackField.stringValue = String(feedback) }
-        updateAutoPilotLabel()
+        updateSyndicateLabel()
     }
 
-    private func updateAutoPilotLabel() {
-        guard let ap = AutoPilotSettings.detect() else {
-            autoPilotLabel.stringValue = "AUTO/PILOT settings not found — enter its OSC ports manually."
-            autoPilotLabel.textColor = Palette.amber
-            useAutoPilotButton.isEnabled = false
+    private func updateSyndicateLabel() {
+        guard let ap = SyndicateSettings.detect() else {
+            syndicateLabel.stringValue = "Syndicate settings not found — enter its OSC ports manually."
+            syndicateLabel.textColor = Palette.amber
+            useSyndicateButton.isEnabled = false
             return
         }
-        useAutoPilotButton.isEnabled = true
+        useSyndicateButton.isEnabled = true
         let matches = ap.listenPort == Int(portField.stringValue)
             && ap.feedbackPort == Int(feedbackField.stringValue)
-        autoPilotLabel.stringValue = ap.summary + (matches ? "  ·  match" : "  ·  uses different ports")
-        autoPilotLabel.textColor = matches ? Palette.green : Palette.amber
+        syndicateLabel.stringValue = ap.summary + (matches ? "  ·  match" : "  ·  uses different ports")
+        syndicateLabel.textColor = matches ? Palette.green : Palette.amber
     }
 
     private func midiSummary() -> String {

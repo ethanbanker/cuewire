@@ -178,7 +178,7 @@ public enum OSCDecoder {
             case "[", "]", "T", "F", "N", "I":
                 // Arrays are bracketed and carry no payload of their own; the
                 // enclosed tags follow inline. T/F/N/I are payload-free too.
-                // AUTO/PILOT sends /Syndicate/ColorPalette as ,[iiii][iiii]…,
+                // Syndicate sends /Syndicate/ColorPalette as ,[iiii][iiii]…,
                 // which previously rejected the whole packet.
                 continue
             case "c", "r", "m":

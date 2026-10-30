@@ -1,6 +1,6 @@
 import Foundation
 
-/// AUTO/PILOT player type reported by `/AutoPilot/Deck/D/PlayerType`.
+/// Syndicate player type reported by `/Syndicate/Deck/D/PlayerType`.
 public enum PlayerType: String, CaseIterable, Sendable {
     case track, arrangement, clip, sampler, empty, unknown
 
@@ -99,15 +99,9 @@ public struct AnalogRule: Sendable {
     public var shiftedAddress: String?
     public var bipolar: Bool
     public var direct: Bool
-    /// The FLX4 filter knob is one physical control: centre is neutral, left is
-    /// low-pass and right is high-pass. When true, `address` is low-pass and
-    /// `shiftedAddress` is high-pass, and the engine sends a centre-split pair
-    /// instead of forwarding the raw 0…1 knob position.
-    public var oneKnobFilter: Bool
 
     public init(channel: UInt8, cc: UInt8, side: Int, address: String,
-                shiftedAddress: String?, bipolar: Bool, direct: Bool,
-                oneKnobFilter: Bool = false) {
+                shiftedAddress: String?, bipolar: Bool, direct: Bool) {
         self.channel = channel
         self.cc = cc
         self.side = side
@@ -115,7 +109,6 @@ public struct AnalogRule: Sendable {
         self.shiftedAddress = shiftedAddress
         self.bipolar = bipolar
         self.direct = direct
-        self.oneKnobFilter = oneKnobFilter
     }
 }
 
@@ -174,7 +167,7 @@ public struct PadBank: Sendable {
     }
 }
 
-/// The complete DDJ-FLX4 -> AUTO/PILOT binding set, ported from `profiles/flx4.json`
+/// The complete DDJ-FLX4 -> Syndicate binding set, ported from `profiles/flx4.json`
 /// plus the FLX4 protocol quirks implemented by the original adapter.
 public enum FLX4Mapping {
     public static let inputNameMatch = "DDJ-FLX4"
@@ -184,8 +177,8 @@ public enum FLX4Mapping {
     public static let padChannels: [UInt8] = [7, 8, 9, 10]
 
     public static let browserEncoder = (channel: UInt8(6), cc: UInt8(64),
-                                        up: "/AutoPilot/Browser/Up",
-                                        down: "/AutoPilot/Browser/Down")
+                                        up: "/Syndicate/Browser/Up",
+                                        down: "/Syndicate/Browser/Down")
 
     public static func resolved(_ route: String, deck: Int) -> String {
         route.replacingOccurrences(of: "{deck}", with: String(deck + 1))
@@ -232,16 +225,16 @@ public enum FLX4Mapping {
                 rules.append(ButtonRule(channel: channel, note: note, side: side, behavior: .bank(bank)))
             }
             rules.append(ButtonRule(channel: channel, note: 84, side: side,
-                                    behavior: .toggle(address: "/AutoPilot/Mixer/CH{deck}/Cue")))
+                                    behavior: .toggle(address: "/Syndicate/Mixer/CH{deck}/Cue")))
             let actions: [(UInt8, FLXAction)] = [
-                (11, FLXAction("/AutoPilot/Deck/{deck}/PlayPause")),
-                (12, FLXAction("/AutoPilot/Deck/{deck}/Cue", release: 0)),
-                (72, FLXAction("/AutoPilot/Deck/{deck}/GridStart")),
-                (16, FLXAction("/AutoPilot/Deck/{deck}/LoopIn")),
-                (17, FLXAction("/AutoPilot/Deck/{deck}/LoopOut")),
-                (77, FLXAction("/AutoPilot/Deck/{deck}/Loop")),
-                (88, FLXAction("/AutoPilot/Deck/{deck}/TempoSync")),
-                (92, FLXAction("/AutoPilot/Deck/{deck}/TempoMaster")),
+                (11, FLXAction("/Syndicate/Deck/{deck}/PlayPause")),
+                (12, FLXAction("/Syndicate/Deck/{deck}/Cue", release: 0)),
+                (72, FLXAction("/Syndicate/Deck/{deck}/GridStart")),
+                (16, FLXAction("/Syndicate/Deck/{deck}/LoopIn")),
+                (17, FLXAction("/Syndicate/Deck/{deck}/LoopOut")),
+                (77, FLXAction("/Syndicate/Deck/{deck}/Loop")),
+                (88, FLXAction("/Syndicate/Deck/{deck}/TempoSync")),
+                (92, FLXAction("/Syndicate/Deck/{deck}/TempoMaster")),
             ]
             for (note, action) in actions {
                 rules.append(ButtonRule(channel: channel, note: note, side: side, behavior: .action(action)))
@@ -250,74 +243,76 @@ public enum FLX4Mapping {
         rules.append(ButtonRule(channel: 6, note: 104, side: 0, behavior: .selectDeck))
         rules.append(ButtonRule(channel: 6, note: 122, side: 1, behavior: .selectDeck))
         rules.append(ButtonRule(channel: 6, note: 70, side: 0,
-                                behavior: .browse(address: "/AutoPilot/Browser/L{deck}")))
+                                behavior: .browse(address: "/Syndicate/Browser/L{deck}")))
         rules.append(ButtonRule(channel: 6, note: 71, side: 1,
-                                behavior: .browse(address: "/AutoPilot/Browser/L{deck}")))
+                                behavior: .browse(address: "/Syndicate/Browser/L{deck}")))
         rules.append(ButtonRule(channel: 6, note: 65, side: 0,
-                                behavior: .browse(address: "/AutoPilot/Browser/Enter")))
+                                behavior: .browse(address: "/Syndicate/Browser/Enter")))
         rules.append(ButtonRule(channel: 6, note: 66, side: 0,
-                                behavior: .browse(address: "/AutoPilot/Browser/Back")))
+                                behavior: .browse(address: "/Syndicate/Browser/Back")))
         return rules
     }()
 
     public static let analog: [AnalogRule] = [
-        AnalogRule(channel: 0, cc: 0, side: 0, address: "/AutoPilot/Deck/{deck}/TempoSlider",
+        AnalogRule(channel: 0, cc: 0, side: 0, address: "/Syndicate/Deck/{deck}/TempoSlider",
                    shiftedAddress: nil, bipolar: true, direct: false),
-        AnalogRule(channel: 1, cc: 0, side: 1, address: "/AutoPilot/Deck/{deck}/TempoSlider",
+        AnalogRule(channel: 1, cc: 0, side: 1, address: "/Syndicate/Deck/{deck}/TempoSlider",
                    shiftedAddress: nil, bipolar: true, direct: false),
-        AnalogRule(channel: 0, cc: 19, side: 0, address: "/AutoPilot/Mixer/CH{deck}/Volume",
+        AnalogRule(channel: 0, cc: 19, side: 0, address: "/Syndicate/Mixer/CH{deck}/Volume",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 1, cc: 19, side: 1, address: "/AutoPilot/Mixer/CH{deck}/Volume",
+        AnalogRule(channel: 1, cc: 19, side: 1, address: "/Syndicate/Mixer/CH{deck}/Volume",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 0, cc: 4, side: 0, address: "/AutoPilot/Mixer/CH{deck}/Trim",
+        AnalogRule(channel: 0, cc: 4, side: 0, address: "/Syndicate/Mixer/CH{deck}/Trim",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 1, cc: 4, side: 1, address: "/AutoPilot/Mixer/CH{deck}/Trim",
+        AnalogRule(channel: 1, cc: 4, side: 1, address: "/Syndicate/Mixer/CH{deck}/Trim",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 0, cc: 7, side: 0, address: "/AutoPilot/Mixer/CH{deck}/EQ/High",
+        AnalogRule(channel: 0, cc: 7, side: 0, address: "/Syndicate/Mixer/CH{deck}/EQ/High",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 1, cc: 7, side: 1, address: "/AutoPilot/Mixer/CH{deck}/EQ/High",
+        AnalogRule(channel: 1, cc: 7, side: 1, address: "/Syndicate/Mixer/CH{deck}/EQ/High",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 0, cc: 11, side: 0, address: "/AutoPilot/Mixer/CH{deck}/EQ/Mid",
+        AnalogRule(channel: 0, cc: 11, side: 0, address: "/Syndicate/Mixer/CH{deck}/EQ/Mid",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 1, cc: 11, side: 1, address: "/AutoPilot/Mixer/CH{deck}/EQ/Mid",
+        AnalogRule(channel: 1, cc: 11, side: 1, address: "/Syndicate/Mixer/CH{deck}/EQ/Mid",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 0, cc: 15, side: 0, address: "/AutoPilot/Mixer/CH{deck}/EQ/Low",
+        AnalogRule(channel: 0, cc: 15, side: 0, address: "/Syndicate/Mixer/CH{deck}/EQ/Low",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 1, cc: 15, side: 1, address: "/AutoPilot/Mixer/CH{deck}/EQ/Low",
+        AnalogRule(channel: 1, cc: 15, side: 1, address: "/Syndicate/Mixer/CH{deck}/EQ/Low",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        // One physical knob, like rekordbox: centre is neutral, the left half
-        // drives AUTO/PILOT's low-pass (Filter1) and the right half its
-        // high-pass (Filter2). Shift keeps the old direct Filter2 control.
-        AnalogRule(channel: 6, cc: 23, side: 0, address: "/AutoPilot/Mixer/CH{deck}/Filter1",
-                   shiftedAddress: "/AutoPilot/Mixer/CH{deck}/Filter2", bipolar: false, direct: false,
-                   oneKnobFilter: true),
-        AnalogRule(channel: 6, cc: 24, side: 1, address: "/AutoPilot/Mixer/CH{deck}/Filter1",
-                   shiftedAddress: "/AutoPilot/Mixer/CH{deck}/Filter2", bipolar: false, direct: false,
-                   oneKnobFilter: true),
+        // One physical knob drives one parameter. Syndicate's filter is a single
+        // nonlinear unit with three controls — CUTOFF, RES, WIDTH, exposed as
+        // Filter1, Filter2 and Filter3 — and CUTOFF is bipolar: left is
+        // low-pass, centre is open, right is high-pass. That is exactly the
+        // travel of the FLX4's centre-detent knob, so the raw 0…1 position goes
+        // out unchanged and the detent lands on "open" for free. Shift reaches
+        // the resonance knob; WIDTH has no FLX4 control.
+        AnalogRule(channel: 6, cc: 23, side: 0, address: "/Syndicate/Mixer/CH{deck}/Filter1",
+                   shiftedAddress: "/Syndicate/Mixer/CH{deck}/Filter2", bipolar: false, direct: false),
+        AnalogRule(channel: 6, cc: 24, side: 1, address: "/Syndicate/Mixer/CH{deck}/Filter1",
+                   shiftedAddress: "/Syndicate/Mixer/CH{deck}/Filter2", bipolar: false, direct: false),
         // Master level, headphone level and headphone cue/master mix live in the
         // header and are shared, so they carry no {deck}. Only the mix knob is
-        // driven direct: AUTO/PILOT publishes no feedback for Header/CueMix, so a
+        // driven direct: Syndicate publishes no feedback for Header/CueMix, so a
         // pickup gate could never open.
-        AnalogRule(channel: 6, cc: 8, side: 0, address: "/AutoPilot/Header/MasterVolume",
+        AnalogRule(channel: 6, cc: 8, side: 0, address: "/Syndicate/Header/MasterVolume",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 6, cc: 13, side: 0, address: "/AutoPilot/Header/CueVolume",
+        AnalogRule(channel: 6, cc: 13, side: 0, address: "/Syndicate/Header/CueVolume",
                    shiftedAddress: nil, bipolar: false, direct: false),
-        AnalogRule(channel: 6, cc: 12, side: 0, address: "/AutoPilot/Header/CueMix",
+        AnalogRule(channel: 6, cc: 12, side: 0, address: "/Syndicate/Header/CueMix",
                    shiftedAddress: nil, bipolar: false, direct: true),
     ]
 
     public static let leds: [LEDRule] = {
         var rules: [LEDRule] = []
         for channel in [UInt8(0), 1] {
-            rules.append(LEDRule(address: "/AutoPilot/Deck/{deck}/Playing", channel: channel,
+            rules.append(LEDRule(address: "/Syndicate/Deck/{deck}/Playing", channel: channel,
                                  kind: .switchLED, number: 11, on: 127, off: 0))
-            rules.append(LEDRule(address: "/AutoPilot/Deck/{deck}/Sync", channel: channel,
+            rules.append(LEDRule(address: "/Syndicate/Deck/{deck}/Sync", channel: channel,
                                  kind: .switchLED, number: 88, on: 127, off: 0))
-            rules.append(LEDRule(address: "/AutoPilot/Deck/{deck}/Loop", channel: channel,
+            rules.append(LEDRule(address: "/Syndicate/Deck/{deck}/Loop", channel: channel,
                                  kind: .switchLED, number: 77, on: 127, off: 0))
-            rules.append(LEDRule(address: "/AutoPilot/Mixer/CH{deck}/Cue", channel: channel,
+            rules.append(LEDRule(address: "/Syndicate/Mixer/CH{deck}/Cue", channel: channel,
                                  kind: .switchLED, number: 84, on: 127, off: 0))
-            rules.append(LEDRule(address: "/AutoPilot/Mixer/CH{deck}/Meter", channel: channel,
+            rules.append(LEDRule(address: "/Syndicate/Mixer/CH{deck}/Meter", channel: channel,
                                  kind: .meter, number: 2, on: 127, off: 0))
         }
         return rules
@@ -329,7 +324,7 @@ extension FLX4Mapping {
     public static let pads: [PadBank] = {
         func action(_ route: String, _ press: Int32 = 1, release: Int32? = nil,
                     slip: SlipTiming? = nil, toggle: Bool = false) -> FLXAction? {
-            FLXAction("/AutoPilot/Deck/{deck}/\(route)", press: press, release: release, slip: slip, toggle: toggle)
+            FLXAction("/Syndicate/Deck/{deck}/\(route)", press: press, release: release, slip: slip, toggle: toggle)
         }
         func bank(_ name: String, _ pads: [FLXAction?], shifted: [FLXAction?]? = nil,
                   forPlayer: [PlayerType: PadLayout] = [:]) -> PadBank {

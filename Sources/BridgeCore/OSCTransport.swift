@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-/// One outbound OSC target. The bridge is a hub: AUTO/PILOT is the primary
+/// One outbound OSC target. The bridge is a hub: Syndicate is the primary
 /// destination and any number of extra machines/apps can be added by prefix.
 public struct OSCDestination: Hashable, Sendable {
     public var host: String
@@ -39,11 +39,17 @@ public final class OSCTransport {
         return Array(destinations.keys)
     }
 
-    public func start(destination host: String, port: UInt16, bindPort: UInt16) throws {
-        try start(destinations: [OSCDestination(host: host, port: port)], bindPort: bindPort)
+    public func start(destination host: String, port: UInt16, bindPort: UInt16,
+                      bindHost: String = "127.0.0.1") throws {
+        try start(destinations: [OSCDestination(host: host, port: port)], bindPort: bindPort,
+                  bindHost: bindHost)
     }
 
-    public func start(destinations: [OSCDestination], bindPort: UInt16) throws {
+    /// `bindHost` is where incoming OSC is accepted. The default loopback is
+    /// right for a socket that only ever hears from an app on this Mac; a
+    /// controller on the LAN needs "0.0.0.0", which accepts every interface.
+    public func start(destinations: [OSCDestination], bindPort: UInt16,
+                      bindHost: String = "127.0.0.1") throws {
         stop()
         guard !destinations.isEmpty else {
             throw NSError(domain: "FLXBridge", code: 2,
@@ -62,14 +68,18 @@ public final class OSCTransport {
         var bindAddress = sockaddr_in()
         bindAddress.sin_family = sa_family_t(AF_INET)
         bindAddress.sin_port = bindPort.bigEndian
-        bindAddress.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        guard inet_pton(AF_INET, bindHost, &bindAddress.sin_addr) == 1 else {
+            close(fd)
+            throw NSError(domain: "FLXBridge", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "OSC bind host must be an IPv4 address, for example 0.0.0.0 (got \(bindHost))"])
+        }
         let bound = withUnsafePointer(to: &bindAddress) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         guard bound == 0 else {
-            let error = posixError("Bind OSC feedback port \(bindPort) (is another bridge running?)")
+            let error = posixError("Bind OSC port \(bindPort) on \(bindHost) (is another bridge running?)")
             close(fd)
             throw error
         }

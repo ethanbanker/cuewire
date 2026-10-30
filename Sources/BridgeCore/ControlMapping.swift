@@ -54,6 +54,12 @@ public struct ControlMapping: Codable, Identifiable, Equatable, Sendable {
     public var number: Int?
     public var control: String?
     public var address: String
+    /// Second target for a relative control, used for anticlockwise movement.
+    /// A browser wheel is two routes (`Browser/Up` and `Browser/Down`), not one
+    /// parameter, so a relative mapping needs somewhere to send the other
+    /// direction. Nil keeps the plain signed-delta behaviour for a tempo nudge
+    /// or any other parameter that takes the delta itself.
+    public var reverseAddress: String?
     public var mode: MappingMode
     public var deck: Int
     public var minimum: Double
@@ -63,8 +69,8 @@ public struct ControlMapping: Codable, Identifiable, Equatable, Sendable {
     public var createdAt: Date
 
     public init(id: UUID = UUID(), name: String = "", source: MappingSourceKind,
-                channel: Int? = nil, number: Int? = nil, control: String? = nil,
-                address: String, mode: MappingMode, deck: Int = 1,
+                channel: Int? = nil, number: Int? = nil,                control: String? = nil,
+                address: String, reverseAddress: String? = nil, mode: MappingMode, deck: Int = 1,
                 minimum: Double = 0, maximum: Double = 1,
                 endpointID: UUID? = nil, enabled: Bool = true, createdAt: Date = Date()) {
         self.id = id
@@ -74,6 +80,7 @@ public struct ControlMapping: Codable, Identifiable, Equatable, Sendable {
         self.number = number
         self.control = control
         self.address = address
+        self.reverseAddress = reverseAddress
         self.mode = mode
         self.deck = deck
         self.minimum = minimum
@@ -100,8 +107,13 @@ public struct ControlMapping: Codable, Identifiable, Equatable, Sendable {
     }
 
     public func resolvedAddress(deck override: Int? = nil) -> String {
+        resolved(address, deck: override)
+    }
+
+    /// Fill the `{deck}`/`{ch}` placeholders in any template this mapping owns.
+    public func resolved(_ template: String, deck override: Int? = nil) -> String {
         let number = override ?? deck
-        return address
+        return template
             .replacingOccurrences(of: "{deck}", with: String(number))
             .replacingOccurrences(of: "{ch}", with: String(number))
     }
@@ -136,7 +148,7 @@ public struct OSCEndpoint: Codable, Identifiable, Equatable, Sendable {
     public var host: String
     public var port: Int
     /// OSC namespace this endpoint owns, for example "/Resolume". The longest
-    /// matching enabled prefix wins; unmatched traffic goes to AUTO/PILOT.
+    /// matching enabled prefix wins; unmatched traffic goes to Syndicate.
     public var prefix: String
     public var enabled: Bool
 
@@ -233,16 +245,56 @@ public final class MappingStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         if let document = try? decoder.decode(MappingDocument.self, from: data) {
-            mappings = document.mappings
+            mappings = document.mappings.map(Self.normalized)
             endpoints = document.endpoints
         } else if let legacy = try? decoder.decode([ControlMapping].self, from: data) {
             // Early development builds wrote a bare array; keep those files usable.
-            mappings = legacy
+            mappings = legacy.map(Self.normalized)
             endpoints = []
         } else {
             mappings = []
             endpoints = []
         }
+    }
+
+    /// Move a mapping saved under the app's pre-rename root onto `/Syndicate`.
+    /// Other destinations keep their own prefix, and the reverse route is part
+    /// of the same target set. Run on load and on save, so a file saved by an
+    /// older build is repaired before the engine sees it, and a mapping the
+    /// editor gets wrong is corrected as it is written rather than a restart
+    /// later.
+    static func normalized(_ mapping: ControlMapping) -> ControlMapping {
+        var mapping = mapping
+        mapping.address = HubRouter.rebrand(mapping.address)
+        mapping.reverseAddress = mapping.reverseAddress.map(HubRouter.rebrand)
+        // The controller renamed its namespace from /Aether to /Nexus. A control
+        // address saved against the old firmware follows, or the mapping stops
+        // matching the board it was learned on.
+        mapping.control = mapping.control.map(NexusAddress.canonical)
+        // A signed-delta source cannot drive a press mode: its anticlockwise
+        // detent arrives as -1, which a Momentary route turns into a release
+        // and a Trigger route into nothing at all, so one direction of the knob
+        // looks dead. Older builds let that pairing be saved, so repair it here.
+        if LearnedControl(source: mapping.source, control: mapping.control, label: "")
+            .isRelativeSource, mapping.mode != .relative {
+            mapping.mode = .relative
+        }
+        // The mirror image, and the one that bit: the board publishes a pot as
+        // the position it is at, so Relative throws that position away. The
+        // delta is the truncated value, which is zero for every position below
+        // full scale, so a whole turn sends a single integer at its very top -
+        // a knob that appears to slam its target to the end and then do nothing.
+        // Only serial: an OSC-in controller may legitimately send deltas for an
+        // address this app knows nothing about, and MIDI CCs keep the mode the
+        // user picked.
+        if mapping.source == .serial,
+           !LearnedControl(source: mapping.source, control: mapping.control, label: "")
+            .isRelativeSource,
+           mapping.mode == .relative {
+            mapping.mode = .absolute
+            mapping.reverseAddress = nil
+        }
+        return mapping
     }
 
     @discardableResult
@@ -262,12 +314,14 @@ public final class MappingStore {
     }
 
     public func add(_ mapping: ControlMapping) {
+        let mapping = Self.normalized(mapping)
         mappings.removeAll { $0.sourceIdentity == mapping.sourceIdentity }
         mappings.append(mapping)
         changed()
     }
 
     public func update(_ mapping: ControlMapping) {
+        let mapping = Self.normalized(mapping)
         if let index = mappings.firstIndex(where: { $0.id == mapping.id }) {
             mappings[index] = mapping
         } else {
@@ -351,7 +405,16 @@ public struct LearnedControl: Equatable, Sendable {
         self.label = label
     }
 
-    public func draft(address: String = "/AutoPilot/Deck/{deck}/PlayPause",
+    /// A source that reports signed movement rather than a position, such as a
+    /// controller's rotary encoder. `/Nexus/Encoder/1` turns and
+    /// `/Nexus/Encoder/1/Push` presses, so only the former is relative.
+    public var isRelativeSource: Bool {
+        guard let control else { return false }
+        let lower = control.lowercased()
+        return lower.contains("/encoder") && !lower.hasSuffix("/push")
+    }
+
+    public func draft(address: String = "/Syndicate/Deck/{deck}/PlayPause",
                       mode: MappingMode = .trigger, deck: Int = 1) -> ControlMapping {
         ControlMapping(name: label, source: source, channel: channel, number: number,
                        control: control, address: address, mode: mode, deck: deck)
@@ -383,7 +446,7 @@ public enum MappingModeResolver {
     /// and then nothing at all as it travels.
     public static func resolvedMode(for address: String, selected: MappingMode) -> MappingMode {
         guard selected == .trigger else { return selected }
-        let kind = AutoPilotCatalog.route(for: address).kind
+        let kind = SyndicateCatalog.route(for: address).kind
         switch kind {
         case .continuous, .bipolar:
             return kind.suggestedMode
@@ -396,30 +459,65 @@ public enum MappingModeResolver {
 // MARK: - Hub routing
 
 public enum HubRouter {
-    /// Fold controller abbreviations and AUTO/PILOT's feedback namespace onto
-    /// the command namespace before sending.
+    /// Rewrite the pre-rename `/AutoPilot` root to `/Syndicate`, leaving every
+    /// other namespace untouched. Mappings saved before the rename are migrated
+    /// with this, so the editor and the wire both speak the current name.
+    public static func rebrand(_ address: String) -> String {
+        let lower = address.lowercased()
+        guard lower == "/autopilot" || lower.hasPrefix("/autopilot/") else { return address }
+        return "/Syndicate" + address.dropFirst("/AutoPilot".count)
+    }
+
+    /// Fold controller abbreviations and the legacy AUTO/PILOT namespace onto
+    /// Syndicate's command namespace before sending.
     public static func commandAddress(_ address: String) -> String? {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
         if !value.hasPrefix("/") { value = "/" + value }
         let lower = value.lowercased()
         if lower.hasPrefix("/syndicate/") {
-            return "/AutoPilot/" + value.dropFirst("/Syndicate/".count)
+            return "/Syndicate/" + value.dropFirst("/Syndicate/".count)
         }
+        // Mappings saved before the rename still spell the root /AutoPilot.
         if lower.hasPrefix("/autopilot/") {
-            return "/AutoPilot/" + value.dropFirst("/AutoPilot/".count)
+            return rebrand(value)
         }
         let areas = ["deck", "mixer", "header", "browser", "feedback"]
         for area in areas where lower == "/" + area || lower.hasPrefix("/\(area)/") {
-            return "/AutoPilot" + value
+            return "/Syndicate" + value
         }
         if lower.hasPrefix("/ap/") {
-            return "/AutoPilot/" + value.dropFirst(4)
+            return "/Syndicate/" + value.dropFirst(4)
         }
         return value
     }
 
-    /// Return the extra endpoint that owns this address, or nil for AUTO/PILOT.
+    /// Rewrite the `/Syndicate` command root onto the root the running app
+    /// actually listens on.
+    ///
+    /// A customised OSC root (`/Stage/Left`) or a pre-rename build that still
+    /// listens on `/AutoPilot` receives none of the default `/Syndicate/...`
+    /// commands, so outbound commands have to follow the detected root or a
+    /// controller press reaches a port that quietly discards it.
+    public static func retarget(_ address: String, root: String?) -> String {
+        guard let root else { return address }
+        var trimmed = root.trimmingCharacters(in: .whitespaces)
+        while trimmed.count > 1 && trimmed.hasSuffix("/") { trimmed.removeLast() }
+        guard !trimmed.isEmpty, trimmed != "/" else { return address }
+        if !trimmed.hasPrefix("/") { trimmed = "/" + trimmed }
+        let lower = address.lowercased()
+        if lower == "/syndicate" || lower.hasPrefix("/syndicate/") {
+            guard trimmed.lowercased() != "/syndicate" else { return address }
+            return trimmed + address.dropFirst("/Syndicate".count)
+        }
+        if lower == "/autopilot" || lower.hasPrefix("/autopilot/") {
+            guard trimmed.lowercased() != "/autopilot" else { return address }
+            return trimmed + address.dropFirst("/AutoPilot".count)
+        }
+        return address
+    }
+
+    /// Return the extra endpoint that owns this address, or nil for Syndicate.
     public static func endpoint(for address: String, endpoints: [OSCEndpoint]) -> OSCEndpoint? {
         guard let command = commandAddress(address) else { return nil }
         return endpoints

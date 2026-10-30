@@ -9,6 +9,7 @@ final class MainViewController: NSViewController {
     private let oscPill = PillView()
     private let feedbackPill = PillView()
     private let latencyPill = PillView()
+    private let latencyPanel = LatencyPanelView()
     private let startButton = NSButton(title: "Start", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "CUEWIRE")
     private let subtitleLabel = NSTextField(labelWithString: "CONTROLLERS  →  OSC API")
@@ -17,6 +18,8 @@ final class MainViewController: NSViewController {
     private let statsLabel = NSTextField(labelWithString: "")
     private let logView = NSTextView()
     private let logScroll = NSScrollView()
+    private weak var activityStack: NSView?
+    private weak var activityHeader: NSStackView?
     private var lastLogCount = -1
 
     override func loadView() {
@@ -112,6 +115,16 @@ final class MainViewController: NSViewController {
         logView.drawsBackground = false
         logView.textContainerInset = NSSize(width: 8, height: 6)
         logView.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        // A detached NSTextView starts at zero size and never grows, so the
+        // document view stayed empty and the log looked blank. Let it track the
+        // clip view's width and grow downwards as lines are appended.
+        logView.isVerticallyResizable = true
+        logView.isHorizontallyResizable = false
+        logView.minSize = NSSize(width: 0, height: 0)
+        logView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                 height: CGFloat.greatestFiniteMagnitude)
+        logView.autoresizingMask = [.width]
+        logView.textContainer?.widthTracksTextView = true
         logScroll.documentView = logView
         logScroll.drawsBackground = false
         logScroll.hasVerticalScroller = true
@@ -121,19 +134,32 @@ final class MainViewController: NSViewController {
         logScroll.layer?.cornerRadius = Palette.radius
         logScroll.layer?.borderColor = Palette.stroke.cgColor
         logScroll.layer?.borderWidth = 1
-        logScroll.translatesAutoresizingMaskIntoConstraints = false
+        // The scroll view is framed manually in `viewDidLayout`: inside a plain
+        // container AppKit kept its intrinsic 676 pt width instead of honouring
+        // the leading/trailing constraints.
+        logScroll.autoresizingMask = [.width]
 
-        let activityStack = NSStackView(views: [activityHeader, logScroll])
-        activityStack.orientation = .vertical
-        activityStack.alignment = .leading
-        activityStack.spacing = 6
+        // A plain container, not an NSStackView: the log must fill the full width
+        // left for it, and a stack view kept pinning it to its intrinsic width.
+        let activityStack = NSView()
         activityStack.translatesAutoresizingMaskIntoConstraints = false
-        activityStack.setHuggingPriority(.defaultHigh, for: .vertical)
+        activityStack.addSubview(activityHeader)
+        activityStack.addSubview(logScroll)
+        activityHeader.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            activityHeader.topAnchor.constraint(equalTo: activityStack.topAnchor),
+            activityHeader.leadingAnchor.constraint(equalTo: activityStack.leadingAnchor),
+            activityHeader.trailingAnchor.constraint(equalTo: activityStack.trailingAnchor),
+            activityHeader.heightAnchor.constraint(equalToConstant: 16),
+        ])
+        self.activityStack = activityStack
+        self.activityHeader = activityHeader
 
         root.addSubview(header)
         root.addSubview(errorLabel)
         root.addSubview(surface)
         root.addSubview(activityStack)
+        root.addSubview(latencyPanel)
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 44),
@@ -151,10 +177,16 @@ final class MainViewController: NSViewController {
 
             activityStack.topAnchor.constraint(equalTo: surface.bottomAnchor, constant: 12),
             activityStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            activityStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             activityStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-            logScroll.heightAnchor.constraint(equalToConstant: 150),
-            activityStack.widthAnchor.constraint(equalTo: surface.widthAnchor),
+            activityStack.trailingAnchor.constraint(equalTo: latencyPanel.leadingAnchor, constant: -12),
+            activityStack.heightAnchor.constraint(equalToConstant: 169),
+
+            // The latency board is pinned to the right edge and shares the log's
+            // height, so the monitor is always visible beside ACTIVITY.
+            latencyPanel.topAnchor.constraint(equalTo: activityStack.topAnchor),
+            latencyPanel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            latencyPanel.widthAnchor.constraint(equalToConstant: 332),
+            latencyPanel.heightAnchor.constraint(equalTo: activityStack.heightAnchor),
         ])
 
         service.onChange = { [weak self] in self?.refresh() }
@@ -164,6 +196,15 @@ final class MainViewController: NSViewController {
     override func viewDidAppear() {
         super.viewDidAppear()
         view.window?.makeFirstResponder(nil)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let activityStack else { return }
+        logScroll.frame = NSRect(x: 0, y: 0, width: activityStack.bounds.width, height: 147)
+        // The frame changes after the text was first laid out, so keep the newest
+        // line in view instead of leaving the log scrolled past its end.
+        logView.scrollToEndOfDocument(nil)
     }
 
     private func refresh() {
@@ -196,7 +237,10 @@ final class MainViewController: NSViewController {
         latencyPill.update(title: "Latency",
                            value: latency.short,
                            color: latency.count > 0 ? Palette.teal : Palette.muted)
-        latencyPill.toolTip = "Input → OSC wire  MIDI: \(service.latency[.midi]?.detailed ?? "none")\nSerial: \(service.latency[.serial]?.detailed ?? "none")\nOSC in: \(service.latency[.osc]?.detailed ?? "none")\nFeedback round-trip: \(service.roundTrip.detailed)"
+        latencyPill.toolTip = "Input → OSC wire  MIDI: \(service.latency[.midi]?.detailed ?? "none")\nSerial: \(service.latency[.serial]?.detailed ?? "none")\nOSC in: \(service.latency[.osc]?.detailed ?? "none")\nSerial ping: \(service.linkRoundTrip.detailed)\nFeedback round-trip: \(service.roundTrip.detailed)"
+        latencyPanel.update(stats: service.latency, history: service.latencyHistory,
+                            linkRoundTrip: service.linkRoundTrip,
+                            linkRoundTripHistory: service.linkRoundTripHistory)
         startButton.title = running ? "Stop" : "Start"
         startButton.contentTintColor = running ? Palette.text : Palette.accent
         surface.snapshot = service.snapshot

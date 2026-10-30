@@ -1,7 +1,7 @@
 import AppKit
 import BridgeCore
 
-/// Mapping editor: capture a hardware control with Learn, choose an AUTO/PILOT
+/// Mapping editor: capture a hardware control with Learn, choose a Syndicate
 /// (or hub) route, and save it. The stock FLX4 map remains the fallback; saved
 /// mappings override it by control identity.
 final class MappingWindowController: NSWindowController, NSTableViewDataSource,
@@ -19,7 +19,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private let service = BridgeService.shared
-    private let catalog = AutoPilotCatalog.all()
+    private let catalog = SyndicateCatalog.all()
     private var mappings: [ControlMapping] = []
     private var endpoints: [OSCEndpoint] = []
     private var learned: LearnedControl?
@@ -39,6 +39,8 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
     private let sourceLabel = NSTextField(labelWithString: "No control captured")
     private let routeCombo = NSComboBox()
     private let routeDetail = NSTextField(labelWithString: "Choose a route or type a custom OSC address.")
+    private let reverseCombo = NSComboBox()
+    private let reverseDetail = NSTextField(labelWithString: "Optional, for Relative: where anticlockwise turns go, e.g. /Syndicate/Browser/Down. A wheel is two routes.")
     private let modePopup = NSPopUpButton()
     private let deckPopup = NSPopUpButton()
     private let minField = NSTextField(string: "0")
@@ -157,6 +159,24 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         routeStack.alignment = .leading
         routeStack.spacing = 2
 
+        reverseCombo.isEditable = true
+        reverseCombo.completes = true
+        reverseCombo.numberOfVisibleItems = 18
+        reverseCombo.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        reverseCombo.addItems(withObjectValues: catalog.map { $0.address })
+        reverseCombo.placeholderString = "/Syndicate/Browser/Down"
+        reverseCombo.translatesAutoresizingMaskIntoConstraints = false
+        reverseCombo.widthAnchor.constraint(greaterThanOrEqualToConstant: 540).isActive = true
+
+        reverseDetail.font = .systemFont(ofSize: 10, weight: .regular)
+        reverseDetail.textColor = Palette.muted
+        reverseDetail.lineBreakMode = .byTruncatingTail
+
+        let reverseStack = NSStackView(views: [reverseCombo, reverseDetail])
+        reverseStack.orientation = .vertical
+        reverseStack.alignment = .leading
+        reverseStack.spacing = 2
+
         for (index, mode) in MappingMode.allCases.enumerated() {
             modePopup.addItem(withTitle: mode.label)
             modePopup.item(at: index)?.representedObject = mode.rawValue
@@ -202,6 +222,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         buttonRow.spacing = 8
 
         configureMappingTable()
+        refreshReverseState()
         mappingScroll.documentView = mappingTable
         mappingScroll.hasVerticalScroller = true
         mappingScroll.autohidesScrollers = true
@@ -217,6 +238,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         let grid = NSGridView(views: [
             [label("Control", size: 10, weight: .regular, color: Palette.muted), sourceLabel],
             [label("Route", size: 10, weight: .regular, color: Palette.muted), routeStack],
+            [label("Reverse route", size: 10, weight: .regular, color: Palette.muted), reverseStack],
             [label("Mode / target", size: 10, weight: .regular, color: Palette.muted), modeRow],
             [label("Name", size: 10, weight: .regular, color: Palette.muted), nameField],
         ])
@@ -266,7 +288,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
     private func buildDestinationsTab() -> NSView {
         let root = NSView()
         let title = label("OSC DESTINATIONS", size: 10, weight: .bold, color: Palette.muted)
-        let hint = label("AUTO/PILOT is the primary destination. Add other gear with the OSC namespace it owns (for example /Resolume); the longest matching prefix wins, and unmatched serial OSC goes to AUTO/PILOT.",
+        let hint = label("Syndicate is the primary destination. Add other gear with the OSC namespace it owns (for example /Resolume); the longest matching prefix wins, and unmatched serial OSC goes to Syndicate.",
                          size: 11, weight: .regular, color: Palette.muted)
         hint.maximumNumberOfLines = 2
 
@@ -399,7 +421,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         let selected = destinationPopup.indexOfSelectedItem
         destinationPopup.removeAllItems()
         destinationIDs = [nil] + endpoints.map { $0.id }
-        destinationPopup.addItem(withTitle: "AUTO/PILOT (primary)")
+        destinationPopup.addItem(withTitle: "Syndicate (primary)")
         for endpoint in endpoints {
             destinationPopup.addItem(withTitle: "\(endpoint.label) · \(endpoint.host):\(endpoint.port)")
         }
@@ -427,13 +449,34 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
             }
         case .learned(let control):
             learnButton.title = "Learn again"
-            learned = control
-            sourceLabel.stringValue = control.label
+            applyLearned(control)
             if showStatus {
                 learnStatus.stringValue = "Captured \(control.label) — choose a route and save."
                 learnStatus.textColor = Palette.teal
             }
         }
+    }
+
+    /// Install a freshly captured control. An encoder only reports signed
+    /// movement, so capturing one selects Relative; left on Trigger it would
+    /// send a single 1 and then nothing as the knob is turned.
+    private func applyLearned(_ control: LearnedControl) {
+        // Only a freshly captured control may change the mode: the learn status
+        // refreshes on a timer, and re-applying the default on every tick would
+        // undo a mode the user picked after the capture.
+        let isNew = learned != control
+        learned = control
+        sourceLabel.stringValue = control.label
+        guard isNew else { return }
+        if control.isRelativeSource, let index = MappingMode.allCases.firstIndex(of: .relative) {
+            modePopup.selectItem(at: index)
+        } else if MappingMode.allCases[min(max(0, modePopup.indexOfSelectedItem),
+                                           MappingMode.allCases.count - 1)] == .relative {
+            // A press captured after a turn must not inherit Relative: it would
+            // send "deltas" that never move the target.
+            modePopup.selectItem(at: 0)
+        }
+        refreshReverseState()
     }
 
     // MARK: - Learn and save
@@ -450,15 +493,27 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         sourceLabel.stringValue = "Listening…"
         service.onLearned = { [weak self] control in
             guard let self else { return }
-            self.learned = control
-            self.sourceLabel.stringValue = control.label
+            self.applyLearned(control)
             self.learnStatus.stringValue = "Captured \(control.label) — choose a route and save."
             self.learnStatus.textColor = Palette.teal
         }
         service.beginLearn(filter)
     }
 
+    /// The reverse route only means something for a relative source: in any
+    /// other mode the delta is a value, so leaving the field live would let a
+    /// user configure a second route that nothing ever sends to.
+    private func refreshReverseState() {
+        let index = max(0, modePopup.indexOfSelectedItem)
+        let mode = MappingMode.allCases[min(index, MappingMode.allCases.count - 1)]
+        let relative = mode == .relative
+        reverseCombo.isEnabled = relative
+        reverseCombo.placeholderString = relative ? "/Syndicate/Browser/Down" : "Relative only"
+        reverseDetail.textColor = relative ? Palette.muted : Palette.muted.withAlphaComponent(0.5)
+    }
+
     @objc private func modeChanged() {
+        refreshReverseState()
         let index = max(0, modePopup.indexOfSelectedItem)
         let mode = MappingMode.allCases[min(index, MappingMode.allCases.count - 1)]
         if mode == .bipolar {
@@ -480,7 +535,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
     /// press (which would send one value and then nothing as it moves).
     private func applyRouteDefaults() {
         let address = routeCombo.stringValue.trimmingCharacters(in: .whitespaces)
-        let route = AutoPilotCatalog.route(for: address)
+        let route = SyndicateCatalog.route(for: address)
         routeDetail.stringValue = "\(route.label) · \(route.group) · \(route.kind.label)"
         if let index = MappingMode.allCases.firstIndex(of: route.kind.suggestedMode) {
             modePopup.selectItem(at: index)
@@ -510,7 +565,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         // mode the user is choosing.
         guard (notification.object as? NSTextField) === routeCombo else { return }
         let address = routeCombo.stringValue.trimmingCharacters(in: .whitespaces)
-        let route = AutoPilotCatalog.route(for: address)
+        let route = SyndicateCatalog.route(for: address)
         routeDetail.stringValue = "\(route.label) · \(route.group) · \(route.kind.label)"
     }
 
@@ -525,7 +580,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         statusPinnedUntil = Date().addingTimeInterval(4)
         let address = routeCombo.stringValue.trimmingCharacters(in: .whitespaces)
         guard address.hasPrefix("/"), address.count > 1 else {
-            learnStatus.stringValue = "Enter an OSC address such as /AutoPilot/Deck/{deck}/PlayPause."
+            learnStatus.stringValue = "Enter an OSC address such as /Syndicate/Deck/{deck}/PlayPause."
             learnStatus.textColor = Palette.red
             return
         }
@@ -541,7 +596,7 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         }
         let modeIndex = max(0, modePopup.indexOfSelectedItem)
         let selectedMode = MappingMode.allCases[min(modeIndex, MappingMode.allCases.count - 1)]
-        let route = AutoPilotCatalog.route(for: address)
+        let route = SyndicateCatalog.route(for: address)
         let mode = MappingModeResolver.resolvedMode(for: address, selected: selectedMode)
         var modeNote = ""
         if mode != selectedMode {
@@ -558,6 +613,12 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
             learnStatus.textColor = Palette.red
             return
         }
+        let reverse = reverseCombo.stringValue.trimmingCharacters(in: .whitespaces)
+        guard reverse.isEmpty || reverse.hasPrefix("/") else {
+            learnStatus.stringValue = "The reverse route must start with / (or leave it empty)."
+            learnStatus.textColor = Palette.red
+            return
+        }
         let deck = max(1, deckPopup.indexOfSelectedItem + 1)
         let destinationIndex = destinationPopup.indexOfSelectedItem
         let endpointID = destinationIndex >= 0 && destinationIndex < destinationIDs.count ? destinationIDs[destinationIndex] : nil
@@ -570,6 +631,9 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         mapping.number = source.2
         mapping.control = source.3
         mapping.address = address
+        // Only a relative control can use a reverse route; clearing the mode
+        // clears the field so a later Trigger mapping cannot inherit it.
+        mapping.reverseAddress = (mode == .relative && !reverse.isEmpty) ? reverse : nil
         mapping.mode = mode
         mapping.deck = deck
         mapping.minimum = minimum
@@ -602,10 +666,12 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         editingID = nil
         learned = nil
         sourceLabel.stringValue = "No control captured"
+        reverseCombo.stringValue = ""
         nameField.stringValue = ""
         minField.stringValue = "0"
         maxField.stringValue = "1"
         modePopup.selectItem(at: 0)
+        refreshReverseState()
         if mappingTable.selectedRow >= 0 { mappingTable.deselectRow(mappingTable.selectedRow) }
         deleteButton.isEnabled = false
         enableButton.isEnabled = false
@@ -704,7 +770,9 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
             case "on": text = mapping.enabled ? "ON" : "off"; color = mapping.enabled ? Palette.green : Palette.muted
             case "name": text = mapping.displayName; color = Palette.text
             case "control": text = mapping.sourceLabel; color = Palette.muted
-            case "target": text = mapping.targetLabel; color = Palette.text
+            case "target":
+                text = mapping.reverseAddress.map { "\(mapping.targetLabel) ↔ \($0)" } ?? mapping.targetLabel
+                color = Palette.text
             case "mode": text = mapping.mode.label; color = Palette.muted
             default: text = ""; color = Palette.text
             }
@@ -754,8 +822,10 @@ final class MappingWindowController: NSWindowController, NSTableViewDataSource,
         learned = nil
         sourceLabel.stringValue = mapping.sourceLabel
         routeCombo.stringValue = mapping.address
+        reverseCombo.stringValue = mapping.reverseAddress ?? ""
         nameField.stringValue = mapping.name
         modePopup.selectItem(at: MappingMode.allCases.firstIndex(of: mapping.mode) ?? 0)
+        refreshReverseState()
         deckPopup.selectItem(at: min(3, max(0, mapping.deck - 1)))
         minField.stringValue = format(mapping.minimum)
         maxField.stringValue = format(mapping.maximum)

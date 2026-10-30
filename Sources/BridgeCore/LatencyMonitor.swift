@@ -28,9 +28,9 @@ public struct LatencyStats: Sendable, Equatable {
 }
 
 /// Rolling timing for the two paths that matter to a live controller:
-/// input → OSC on the wire, and command → AUTO/PILOT feedback.
+/// input → OSC on the wire, and command → Syndicate feedback.
 ///
-/// The round-trip figures are a best-effort probe: AUTO/PILOT publishes on its
+/// The round-trip figures are a best-effort probe: Syndicate publishes on its
 /// own 30 Hz feedback clock, so this measures "how long until the first packet
 /// that confirms this route", not a dedicated ping. Expected probes expire
 /// after a second so unrelated periodic feedback cannot invent numbers.
@@ -41,6 +41,9 @@ public final class LatencyMonitor {
     private var samples: [LatencySource: [Double]] = [:]
     private var pending: [String: Date] = [:]
     private var roundTrips: [Double] = []
+    /// Ping/pong round-trip to the serial board, kept apart from the
+    /// Syndicate feedback probe: it measures the wire itself.
+    private var linkRoundTrips: [Double] = []
 
     public init() {}
 
@@ -58,10 +61,7 @@ public final class LatencyMonitor {
     public func record(milliseconds: Double, source: LatencySource) {
         guard milliseconds.isFinite, milliseconds >= 0 else { return }
         var values = samples[source, default: []]
-        values.append(milliseconds)
-        if values.count > Self.maximumSamples {
-            values.removeFirst(values.count - Self.maximumSamples)
-        }
+        Self.append(milliseconds, to: &values)
         samples[source] = values
     }
 
@@ -71,6 +71,25 @@ public final class LatencyMonitor {
 
     public var roundTrip: LatencyStats {
         Self.summary(roundTrips)
+    }
+
+    public var linkRoundTrip: LatencyStats {
+        Self.summary(linkRoundTrips)
+    }
+
+    /// Recent input-to-wire samples, oldest first, for a sparkline.
+    public func recent(_ source: LatencySource, limit: Int = 60) -> [Double] {
+        Self.tail(samples[source] ?? [], limit: limit)
+    }
+
+    public func recentLinkRoundTrips(limit: Int = 60) -> [Double] {
+        Self.tail(linkRoundTrips, limit: limit)
+    }
+
+    /// Record one `/Nexus/Pong` round trip.
+    public func recordLinkRoundTrip(milliseconds: Double) {
+        guard milliseconds.isFinite, milliseconds >= 0 else { return }
+        Self.append(milliseconds, to: &linkRoundTrips)
     }
 
     // MARK: - Feedback probes
@@ -92,10 +111,7 @@ public final class LatencyMonitor {
         let seconds = date.timeIntervalSince(sent)
         guard seconds >= 0, seconds <= 1 else { return nil }
         let milliseconds = seconds * 1_000
-        roundTrips.append(milliseconds)
-        if roundTrips.count > Self.maximumSamples {
-            roundTrips.removeFirst(roundTrips.count - Self.maximumSamples)
-        }
+        Self.append(milliseconds, to: &roundTrips)
         return milliseconds
     }
 
@@ -107,9 +123,22 @@ public final class LatencyMonitor {
         samples.removeAll()
         pending.removeAll()
         roundTrips.removeAll()
+        linkRoundTrips.removeAll()
     }
 
     // MARK: - Summary
+
+    private static func append(_ value: Double, to values: inout [Double]) {
+        values.append(value)
+        if values.count > maximumSamples {
+            values.removeFirst(values.count - maximumSamples)
+        }
+    }
+
+    private static func tail(_ values: [Double], limit: Int) -> [Double] {
+        guard limit > 0 else { return [] }
+        return Array(values.suffix(limit))
+    }
 
     static func summary(_ values: [Double]) -> LatencyStats {
         guard !values.isEmpty else { return .empty }

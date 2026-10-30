@@ -8,14 +8,14 @@ enum SnapshotRenderer {
         let engine = FLX4Engine()
         engine.analogPickup = false // match the app's default absolute faders/knobs
         for deck in 1...4 {
-            _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Deck/\(deck)/PlayerType", [.string("track")])))
+            _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Deck/\(deck)/PlayerType", [.string("track")])))
         }
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Deck/1/Playing", [.float(1)])))
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Deck/1/Sync", [.float(1)])))
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Mixer/CH1/Cue", [.float(1)])))
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Deck/1/TempoSlider", [.float(0.0)])))
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Mixer/CH1/Volume", [.float(0.72)])))
-        _ = engine.handle(packet: .message(OSCMessage("/AutoPilot/Mixer/CH1/Meter", [.float(0.55)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Deck/1/Playing", [.float(1)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Deck/1/Sync", [.float(1)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Mixer/CH1/Cue", [.float(1)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Deck/1/TempoSlider", [.float(0.0)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Mixer/CH1/Volume", [.float(0.72)])))
+        _ = engine.handle(packet: .message(OSCMessage("/Syndicate/Mixer/CH1/Meter", [.float(0.55)])))
         _ = engine.handle(midi: [0x90, 11, 127])   // PLAY pressed
         _ = engine.handle(midi: [0x97, 0, 127])    // hot cue 1 pressed
         _ = engine.handle(midi: [0x90, 32, 127])   // bank 2 on the left deck

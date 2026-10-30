@@ -46,6 +46,10 @@ final class BridgeService {
 
     private(set) var latency: [LatencySource: LatencyStats] = [:]
     private(set) var roundTrip: LatencyStats = .empty
+    private(set) var linkRoundTrip: LatencyStats = .empty
+    /// Recent samples for the latency panel's sparklines.
+    private(set) var latencyHistory: [LatencySource: [Double]] = [:]
+    private(set) var linkRoundTripHistory: [Double] = []
     private(set) var learnState: LearnState = .off
     private(set) var lastLearned: LearnedControl?
 
@@ -72,13 +76,57 @@ final class BridgeService {
     private var oscLogCount = 0
     private var loggedAddresses: Set<String> = []
     private var midiMessageCount = 0
-    private var autoPilot: AutoPilotSettings?
+    private var syndicate: SyndicateSettings?
     private var serialMirrorAddresses: Set<String> = []
-    private var engineMirrorAddresses: Set<String> = []
+    private var serialMirror = SerialFeedbackMirror()
+    private var playback = DeckPlaybackTracker()
+    private var serialDeviceIdentity: UInt64?
+    private var heartbeat = SerialHeartbeat()
+    private var serialPingSentAt: Date?
+    private var loggedLinkRtt = 0
+    private var loggedTracks: Set<String> = []
+    private var loggedTrackAddresses: Set<String> = []
+    private var loggedDeckMutations: Set<String> = []
+    private var tempoTracker = DeckTempoTracker()
+    private var lastLiveTempo: [Int: Double] = [:]
+    private var lastTempoSentAt: [Int: Date] = [:]
+    private var lastMetadataSave: Date = .distantPast
+    private var lastHeaderTempoLog: Date = .distantPast
+    /// First master-clock beat forwarded to a freshly connected board. One line
+    /// is enough to show the clock is wired; every beat would flood the log.
+    private var loggedClockBeat = false
+    /// Deck titles/BPM survive a relaunch and cover a resend that was missed.
+    private var deckMetadata = BridgeService.loadDeckMetadata()
+
+    private static var deckMetadataPath: String {
+        (MappingStore.defaultDirectory as NSString).appendingPathComponent("deck-metadata.json")
+    }
+
+    private static func loadDeckMetadata() -> DeckMetadataCache {
+        guard let data = FileManager.default.contents(atPath: deckMetadataPath) else {
+            return DeckMetadataCache()
+        }
+        return DeckMetadataCache.decode(data)
+    }
+
+    private func saveDeckMetadata() {
+        do {
+            try FileManager.default.createDirectory(atPath: MappingStore.defaultDirectory,
+                                                    withIntermediateDirectories: true)
+            try deckMetadata.encoded().write(to: URL(fileURLWithPath: Self.deckMetadataPath),
+                                             options: .atomic)
+        } catch {
+            logAsync(.warn, "Could not save deck metadata: \(error.localizedDescription)")
+        }
+    }
     private var routingEndpoints: [OSCEndpoint] = []
     private var lastSerialError: String?
     private var loggedPassthrough: Set<String> = []
     private var serialRetryAt = Date.distantPast
+    /// Last palette written to the pod strip, so an unchanged palette is not
+    /// resent every tick.
+    private var lastPodStripPalette: [String] = []
+    private var lastPodStripRefresh = Date.distantPast
 
     private enum Keys {
         static let destination = "oscDestination"
@@ -96,8 +144,8 @@ final class BridgeService {
 
     private init() {
         let defaults = UserDefaults.standard
-        let detected = AutoPilotSettings.detect()
-        autoPilot = detected
+        let detected = SyndicateSettings.detect()
+        syndicate = detected
         destination = defaults.string(forKey: Keys.destination)
             ?? detected?.feedbackHost
             ?? "127.0.0.1"
@@ -112,7 +160,7 @@ final class BridgeService {
         analogPickup = BridgeService.boolean(defaults, Keys.analogPickup) ?? false
         serialEnabled = BridgeService.boolean(defaults, Keys.serialEnabled) ?? true
         serialPort = defaults.string(forKey: Keys.serialPort) ?? ""
-        serialBaud = BridgeService.integer(defaults, Keys.serialBaud) ?? 115_200
+        serialBaud = BridgeService.integer(defaults, Keys.serialBaud) ?? SerialTransport.defaultBaud
         serialFraming = SerialFraming(rawValue: defaults.string(forKey: Keys.serialFraming) ?? "") ?? .auto
         mirrorSerialFeedback = BridgeService.boolean(defaults, Keys.mirrorSerialFeedback) ?? true
         mappingStore = MappingStore()
@@ -122,7 +170,7 @@ final class BridgeService {
         engine.userMappings = mappings
         refreshSerialMirror()
         routingEndpoints = endpoints
-        engineMirrorAddresses = serialMirrorAddresses
+        serialMirror.setOwned(serialMirrorAddresses)
         serialPorts = SerialTransport.availablePorts()
     }
 
@@ -195,7 +243,7 @@ final class BridgeService {
             guard let self else { return }
             self.engine.userMappings = nextMappings
             self.routingEndpoints = nextEndpoints
-            self.engineMirrorAddresses = mirror
+            self.serialMirror.setOwned(mirror)
             self.publish()
         }
         updateDestinations()
@@ -281,7 +329,12 @@ final class BridgeService {
                 for message in packet.messages {
                     self.latencyMonitor.recordFeedback(address: message.address)
                 }
+                self.logTrackFeedback(packet)
+                self.trackLiveTempo(packet)
                 self.drain(self.engine.handle(packet: packet))
+                // Syndicate never publishes Playing, so position movement is
+                // what tells us a deck is running.
+                self.playback.observe(packet)
                 if self.mirrorSerialFeedback {
                     self.mirrorToSerial(packet)
                 }
@@ -341,6 +394,7 @@ final class BridgeService {
                 guard let self else { return }
                 self.serialConnected = false
                 self.serialPath = nil
+                self.serialDeviceIdentity = nil
                 self.serialRetryAt = .distantPast
                 self.notify()
             }
@@ -374,14 +428,19 @@ final class BridgeService {
             self.engine.analogPickup = self.analogPickup
             self.engine.flx4PresetEnabled = flx4Present
             self.routingEndpoints = nextEndpoints
-            self.engineMirrorAddresses = mirror
+            self.serialMirror.setOwned(mirror)
             self.drain(self.engine.start())
         }
         startTimer()
         connectSerialIfNeeded(force: true)
+        // Syndicate sends state on change only, so a freshly started bridge
+        // knows neither the deck tempos nor the SYNC relationships until one of
+        // them moves. The documented way to catch up is Feedback/Resend, which
+        // replays every subscribed value (user guide 14.10).
+        requestFeedbackResend()
         log(.info, "Bridge started: OSC to \(destination):\(destinationPort), feedback on \(feedbackPort)")
         logMIDIDiscovery()
-        logAutoPilotDiagnostics()
+        logSyndicateDiagnostics()
         logSerialDiscovery()
         notify()
     }
@@ -394,7 +453,7 @@ final class BridgeService {
             return
         }
         guard controlInputPort != feedbackPort else {
-            log(.warn, "OSC control input is disabled: it uses the same port as AUTO/PILOT feedback")
+            log(.warn, "OSC control input is disabled: it uses the same port as Syndicate feedback")
             return
         }
         controlOSC.onPacket = { [weak self] packet in
@@ -409,8 +468,12 @@ final class BridgeService {
             DispatchQueue.main.async { self?.log(.warn, message) }
         }
         do {
-            try controlOSC.start(destinations: oscDestinations, bindPort: UInt16(controlInputPort))
-            log(.info, "OSC control input listening on \(controlInputPort) (TouchOSC, another bridge, etc.)")
+            // Controllers send from the LAN: the control port binds every
+            // interface, unlike the feedback socket, which only hears Syndicate
+            // on this Mac.
+            try controlOSC.start(destinations: oscDestinations, bindPort: UInt16(controlInputPort),
+                                 bindHost: "0.0.0.0")
+            log(.info, "OSC control input listening on 0.0.0.0:\(controlInputPort) (TouchOSC, OSC/PILOT, another bridge, etc.)")
         } catch {
             log(.warn, "OSC control input \(controlInputPort) unavailable: \(error.localizedDescription)")
         }
@@ -433,7 +496,9 @@ final class BridgeService {
         running = false
         deviceConnected = false
         serialConnected = false
+        serialPingSentAt = nil
         serialPath = nil
+        serialDeviceIdentity = nil
         midiInputs = []
         midiOutputs = []
         log(.info, reason.map { "Bridge stopped: \($0)" } ?? "Bridge stopped")
@@ -472,6 +537,7 @@ final class BridgeService {
         serial.stop()
         serialConnected = false
         serialPath = nil
+        serialDeviceIdentity = nil
         connectSerialIfNeeded(force: true)
         notify()
     }
@@ -487,19 +553,50 @@ final class BridgeService {
             return
         }
         if serial.isOpen {
-            serialConnected = true
-            return
+            // A descriptor survives its device: unplugging the controller leaves
+            // it open, so without this check the port is never reopened and the
+            // user has to toggle Serial OSC to recover.
+            if SerialTransport.isStale(path: serial.path, identity: serialDeviceIdentity) {
+                logAsync(.info, "Serial device changed; reopening")
+                serial.stop()
+                serialConnected = false
+                serialPath = nil
+                serialDeviceIdentity = nil
+                serialRetryAt = .distantPast
+            } else {
+                serialConnected = true
+                return
+            }
         }
         let now = Date()
         guard force || now >= serialRetryAt else { return }
         serialRetryAt = now.addingTimeInterval(1.5)
+        let resolved = SerialTransport.resolve(configured: serialPort, available: serialPorts)
         do {
-            try serial.start(path: serialPort.isEmpty ? nil : serialPort,
-                              baud: serialBaud, framing: serialFraming)
+            try serial.start(path: resolved, baud: serialBaud, framing: serialFraming)
+            if !serialPort.isEmpty && resolved != serialPort {
+                logAsync(.info, "Configured port \(serialPort) is gone; using \(serial.path ?? "?")")
+            }
             serialPath = serial.path
+            serialDeviceIdentity = serial.path.flatMap { SerialTransport.deviceIdentity($0) }
             serialConnected = true
+            loggedClockBeat = false
+            heartbeat.opened(at: Date())
+            serialPingSentAt = nil
             serialError = nil
             lastSerialError = nil
+            // A freshly opened port usually means a freshly booted controller,
+            // so republish the current deck state instead of waiting out the
+            // refresh interval.
+            queue.async { [weak self] in
+                guard let self else { return }
+                // A fresh port usually means a freshly booted board: replay what
+                // Syndicate only sends on change (titles, BPM, loop state).
+                self.serialMirror.reset()
+                for message in self.serialMirror.snapshot() {
+                    self.serial.send(message)
+                }
+            }
             logAsync(.info, "Serial OSC connected on \(serial.path ?? "?") at \(serialBaud) baud (\(serialFraming.rawValue))")
         } catch {
             serialConnected = false
@@ -529,7 +626,292 @@ final class BridgeService {
     /// transformed, everything else is forwarded through the hub with deck/mixer
     /// abbreviations expanded.
     private func handleSerial(packet: OSCPacket) {
-        handleExternalOSC(packet, source: .serial)
+        // The board answers /Nexus/Ping with /Nexus/Pong and echoes the track
+        // it kept. Those are link housekeeping, not controller input, so they
+        // never reach the mapping engine or the passthrough destinations.
+        var remaining: [OSCMessage] = []
+        var encoderInputs: [OSCMessage] = []
+        for incoming in packet.messages {
+            // Firmware from before the Nexus rename speaks /Aether, and a saved
+            // mapping may still name that prefix. Fold both onto /Nexus here,
+            // at the boundary, so nothing downstream has to know about it.
+            var message = incoming
+            message.address = NexusAddress.canonical(incoming.address)
+            switch SerialInputRouter.kind(for: message.address) {
+            case .housekeeping:
+                let lower = message.address.lowercased()
+                if lower == "/nexus/pong" {
+                    recordPong()
+                } else if lower.hasPrefix("/nexus/track") {
+                    logTrackEcho(message)
+                } else {
+                    sendCachedTrack(for: message)
+                }
+            case .mappable:
+                encoderInputs.append(message)
+            case .control:
+                remaining.append(message)
+            }
+        }
+        handleEncoderInput(encoderInputs)
+        guard !remaining.isEmpty else { return }
+        handleExternalOSC(OSCPacket.bundle(remaining.map { .message($0) }), source: .serial)
+    }
+
+    /// Feed encoder turns and presses through learn/mapping only.
+    private func handleEncoderInput(_ messages: [OSCMessage]) {
+        guard !messages.isEmpty else { return }
+        let learning: Bool
+        if case .waiting(let filter) = engine.learnState {
+            learning = filter == .any || filter == .serial
+        } else {
+            learning = false
+        }
+        for message in messages {
+            if learning || engine.mapping(forControl: message.address) != nil {
+                drain(engine.handle(control: message, source: .serial))
+            } else if loggedPassthrough.insert(message.address).inserted {
+                logAsync(.info, "Encoder input \(message.address) has no mapping; learn it in Bridge → OSC Mapping…")
+            }
+        }
+        if engine.learnState.isActive {
+            learnState = engine.learnState
+        }
+    }
+
+    /// Turns each deck's position stream into its live tempo and forwards it as
+    /// `/Deck/<n>/BPM` to the controller. Syndicate's own BPM route does not
+    /// follow the fader, and position is the only high-rate signal it sends.
+    private func trackLiveTempo(_ packet: OSCPacket) {
+        let now = Date()
+        for message in packet.messages {
+            let lower = message.address.lowercased()
+            guard lower.hasSuffix("/position"),
+                  let deck = DeckMetadataCache.deckNumber(in: message.address),
+                  let position = message.firstFloat.map(Double.init) else { continue }
+            guard let rate = tempoTracker.observe(deck: deck, position: position, at: now),
+                  let metadata = deckMetadata.decks[deck], metadata.bpm > 0 else { continue }
+            // Five updates a second is as fast as the panel can usefully follow
+            // a fader. Evaluate the change only at that cadence.
+            if now.timeIntervalSince(lastTempoSentAt[deck] ?? .distantPast) < 0.2 { continue }
+
+            // A synced deck runs at the session tempo by definition, so the
+            // exact `/Header/BPM` beats any measurement of its playhead. This is
+            // also the case that used to jitter between 129.0 and 129.1: a
+            // fitted rate is never exactly 1.0.
+            let syncedMaster = metadata.synced == true ? deckMetadata.masterTempo : nil
+            let raw: Double
+            let live: Double
+            if let master = syncedMaster, master > 0 {
+                raw = master
+                live = (master * 10).rounded() / 10
+                guard lastLiveTempo[deck] != live else { continue }
+            } else {
+                raw = metadata.bpm * rate
+                guard LiveTempoDisplay.shouldReplace(previous: lastLiveTempo[deck], raw: raw)
+                else { continue }
+                live = LiveTempoDisplay.value(trackBpm: metadata.bpm, rate: rate)
+            }
+            if lastLiveTempo[deck] == nil {
+                logAsync(.info, "Deck \(deck) live tempo from position: \(String(format: "%.1f", live))")
+            }
+            lastTempoSentAt[deck] = now
+            lastLiveTempo[deck] = live
+            deckMetadata.recordLiveBpm(deck: deck, bpm: live)
+            if now.timeIntervalSince(lastMetadataSave) >= 5 {
+                lastMetadataSave = now
+                saveDeckMetadata()
+            }
+            serial.send(OSCMessage("/Syndicate/Deck/\(deck)/BPM", [.float(Float(live))]))
+        }
+    }
+
+    /// Ask Syndicate to republish every subscribed value. Change-only routes
+    /// (`BPM`, `Sync`, `TrackInfo`, `TempoSliderEnabled`) are otherwise invisible
+    /// to a bridge that started after them, which is why cards used to sit on a
+    /// stale tempo and the MASTER tag only appeared after a deck was toggled.
+    private func requestFeedbackResend() {
+        // The resend lives under the address root, which can be renamed. Send
+        // the detected root and the default, so a renamed app still answers.
+        var roots = ["/Syndicate"]
+        if let root = syndicate?.addressRoot, !roots.contains(root) { roots.append(root) }
+        for root in roots {
+            osc.send(OSCMessage("\(root)/Feedback/Resend", [.int(1)]))
+        }
+    }
+
+    /// Remembers the session tempo so a reconnecting board starts with the
+    /// right number instead of waiting for the fader to move.
+    private func observeMasterTempo(_ message: OSCMessage) {
+        guard message.address.lowercased().hasSuffix("/header/bpm"), let bpm = message.firstFloat
+        else { return }
+        guard deckMetadata.recordMasterTempo(Double(bpm)) else { return }
+        saveDeckMetadata()
+        // A synced deck follows the header even while it is paused, when there
+        // is no playhead to measure. Push the exact number so a stopped card
+        // does not sit on the tempo it had before the master fader moved.
+        let now = Date()
+        for deck in deckMetadata.decks.keys.sorted() {
+            sendSyncedTempo(deck: deck, at: now)
+        }
+    }
+
+    /// Send the session tempo to one synced deck, rate limited like the
+    /// measured stream so a moving header fader cannot flood the serial link.
+    private func sendSyncedTempo(deck: Int, at now: Date) {
+        guard deckMetadata.decks[deck]?.synced == true,
+              let live = deckMetadata.liveBpmMessage(for: deck),
+              now.timeIntervalSince(lastTempoSentAt[deck] ?? .distantPast) >= 0.2 else { return }
+        lastTempoSentAt[deck] = now
+        lastLiveTempo[deck] = deckMetadata.decks[deck]?.currentBpm
+        serial.send(live)
+    }
+
+    /// The board asks for a deck's metadata when it has none, which recovers a
+    /// `TrackInfo` that was dropped on the wire.
+    private func sendCachedTrack(for request: OSCMessage) {
+        guard let raw = request.address.split(separator: "/").last, let deck = Int(raw),
+              let message = deckMetadata.message(for: deck) else { return }
+        serial.send(message)
+        if let live = deckMetadata.liveBpmMessage(for: deck) { serial.send(live) }
+        logAsync(.info, "Board asked for deck \(deck) metadata; resent it")
+    }
+
+    private func logTrackEcho(_ message: OSCMessage) {
+        let title = message.arguments.compactMap { argument -> String? in
+            if case .string(let value) = argument { return value }
+            return nil
+        }.first ?? ""
+        logAsync(.info, "Board kept \(message.address): \(title.isEmpty ? "(no title)" : title)")
+    }
+
+    // MARK: - Serial link liveness
+
+    private func recordPong() {
+        let received = Date()
+        if let sent = serialPingSentAt {
+            let milliseconds = received.timeIntervalSince(sent) * 1_000
+            if milliseconds >= 0, milliseconds < 6_000 {
+                latencyMonitor.recordLinkRoundTrip(milliseconds: milliseconds)
+                if loggedLinkRtt < 5 {
+                    loggedLinkRtt += 1
+                    logAsync(.info, "Serial link round-trip: \(String(format: "%.2f", milliseconds)) ms")
+                }
+            }
+            serialPingSentAt = nil
+        }
+        switch heartbeat.recordPong(at: received) {
+        case .steady:
+            return
+        case .linked:
+            republishDeckState()
+            // The board just came up; ask for a full resend so it starts with
+            // the current tempo and SYNC state rather than an empty card.
+            requestFeedbackResend()
+        case .resynced:
+            republishDeckState()
+            logAsync(.info, "Controller came back; republishing deck state")
+            // Ask Syndicate to resend everything too: the host may have missed
+            // changes while the link was down.
+            requestFeedbackResend()
+        }
+    }
+
+    private func republishDeckState() {
+        let snapshot = serialMirror.snapshot()
+        // Track info only arrives on load, so after a restart the mirror has
+        // none: fall back to the cached copy for any deck it cannot cover.
+        let covered = Set(snapshot
+            .filter { $0.address.lowercased().hasSuffix("/trackinfo") }
+            .compactMap { DeckMetadataCache.deckNumber(in: $0.address) })
+        serialMirror.reset()
+        for message in snapshot {
+            serial.send(message)
+        }
+        for deck in covered {
+            if let live = deckMetadata.liveBpmMessage(for: deck) { serial.send(live) }
+            if let sync = deckMetadata.syncMessage(for: deck) { serial.send(sync) }
+        }
+        for deck in deckMetadata.decks.keys.sorted() where !covered.contains(deck) {
+            if let sync = deckMetadata.syncMessage(for: deck) { serial.send(sync) }
+        }
+        if let tempo = deckMetadata.masterTempoMessage() { serial.send(tempo) }
+        var replayed = 0
+        for message in deckMetadata.messages() {
+            if let deck = DeckMetadataCache.deckNumber(in: message.address), covered.contains(deck) {
+                continue
+            }
+            serial.send(message)
+            replayed += 1
+            // TrackInfo carries the file tempo; restore the live one too.
+            if let deck = DeckMetadataCache.deckNumber(in: message.address),
+               let live = deckMetadata.liveBpmMessage(for: deck) {
+                serial.send(live)
+            }
+        }
+        if replayed > 0 {
+            logAsync(.info, "Replayed cached metadata for \(replayed) deck(s)")
+        }
+        // A board that just connected has no pixels yet, so paint it straight
+        // away rather than waiting for the next tick.
+        sendPodStrip()
+    }
+
+    /// The pod strip shows Syndicate's eight hot-cue colours, pixel *n* under
+    /// pod key *n*. The palette is a general preference the user can change
+    /// while both apps run, so it is re-read on a fast tick.
+    ///
+    /// The frame is resent every time rather than only when it changes. A board
+    /// that reboots keeps the USB port open and goes on answering pings, so
+    /// nothing else notices; its pixels are wiped, and because the firmware
+    /// deduplicates frames it never repaints itself. Repainting on a tick is
+    /// what brings the strip back from the firmware's idle colour, and eight
+    /// small messages on a 921600 link cost nothing.
+    private func refreshPodStrip(at now: Date) {
+        guard serial.isOpen, now.timeIntervalSince(lastPodStripRefresh) >= 2 else { return }
+        lastPodStripRefresh = now
+        sendPodStrip()
+    }
+
+    private func sendPodStrip() {
+        guard serial.isOpen else { return }
+        let palette = PodStrip.palette(from: SyndicateSettings.detect())
+        let changed = palette != lastPodStripPalette
+        lastPodStripPalette = palette
+        for message in PodStrip.messages(for: palette) {
+            serial.send(message)
+        }
+        if changed {
+            logAsync(.info, "Pod strip ← hot-cue palette \(palette.joined(separator: ", "))")
+        }
+    }
+
+    /// Pings the board and reopens the port when it stops answering. Without
+    /// this a wedged (or silently half-closed) descriptor keeps looking healthy,
+    /// the panels freeze, and only a manual rescan in Settings revives them.
+    private func maintainSerialLink(at now: Date) {
+        guard serial.isOpen else { return }
+        if heartbeat.pingDue(at: now) {
+            serialPingSentAt = now
+            serial.send(OSCMessage(NexusAddress.ping, [.int(1)]))
+        }
+        if heartbeat.shouldRestart(at: now) {
+            let silence = String(format: "%.0f", heartbeat.silence(at: now))
+            logAsync(.warn, "Serial controller silent for \(silence)s; reopening \(serialPath ?? "port")")
+            restartSerialLink()
+        }
+    }
+
+    /// Queue-local reopen: reconnecting from the timer must not bounce through
+    /// the UI-facing `reconnectSerial`, which Settings calls on the main thread.
+    private func restartSerialLink() {
+        serial.stop()
+        serialPingSentAt = nil
+        serialConnected = false
+        serialPath = nil
+        serialDeviceIdentity = nil
+        serialRetryAt = .distantPast
+        connectSerialIfNeeded(force: true)
     }
 
     private func handleExternalOSC(_ packet: OSCPacket, source: MappingSourceKind) {
@@ -566,23 +948,147 @@ final class BridgeService {
                 logAsync(.info, "\(label) → \(endpoint.label) \(address)")
             }
         } else {
-            osc.send(forwarded)
-            if loggedPassthrough.insert(address).inserted {
-                logAsync(.info, "\(label) → AUTO/PILOT \(address)")
+            let sent = HubRouter.retarget(forwarded.address, root: syndicate?.addressRoot)
+            osc.send(OSCMessage(sent, forwarded.arguments))
+            if loggedPassthrough.insert(sent).inserted {
+                logAsync(.info, "\(label) → Syndicate \(sent)")
             }
         }
         passthroughSent += 1
     }
 
-    /// Mirror only routes that a serial control owns, so the ESP32-S3 can drive
-    /// LEDs/meters without receiving all 293 AUTO/PILOT feedback paths at 30 Hz.
-    private func mirrorToSerial(_ packet: OSCPacket) {
-        guard serial.isOpen, !engineMirrorAddresses.isEmpty else { return }
-        for message in packet.messages {
-            guard engineMirrorAddresses.contains(FLX4Engine.canonical(message.address)) else { continue }
-            guard let address = HubRouter.commandAddress(message.address) else { continue }
-            serial.send(OSCMessage(address, message.arguments))
+    /// Turn the derived play state into the `/Deck/<n>/Playing` messages the
+    /// serial controller listens for. Runs on every timer tick; the mirror drops
+    /// repeats and refreshes once a second so a rebooted board catches up.
+    private func publishDeckState(at now: Date) {
+        guard mirrorSerialFeedback, serial.isOpen else { return }
+        let states = playback.states(at: now)
+        guard !states.isEmpty else { return }
+        let packet = OSCPacket.bundle(states.keys.sorted().map { deck in
+            .message(OSCMessage("/Syndicate/Deck/\(deck)/Playing", [.int(states[deck] == true ? 1 : 0)]))
+        })
+        for message in serialMirror.messages(for: packet, at: now) {
+            serial.send(message)
         }
+    }
+
+    /// Mirror mapped routes plus deck play state, so the ESP32-S3 can drive its
+    /// panels and LEDs without receiving all 293 Syndicate feedback paths at
+    /// 30 Hz.
+    private func mirrorToSerial(_ packet: OSCPacket) {
+        guard serial.isOpen else { return }
+        for message in serialMirror.messages(for: packet) {
+            observeDeckMetadata(message)
+            observeMasterTempo(message)
+            logDeckMutation(message)
+            logHeaderTempo(message)
+            if !loggedClockBeat, message.address.lowercased().hasSuffix("/header/clock") {
+                loggedClockBeat = true
+                logAsync(.info, "Master clock → board: beat \(message.firstInt ?? 0)")
+            }
+            serial.send(message)
+        }
+    }
+
+    /// Logs the deck messages that *change* the card (not the playhead), once
+    /// each. This is what shows whether a later `Loaded` wipes the title that
+    /// `TrackInfo` just set.
+    private func logDeckMutation(_ message: OSCMessage) {
+        let lower = message.address.lowercased()
+        guard lower.contains("/deck/") else { return }
+        guard lower.hasSuffix("/trackinfo") || lower.hasSuffix("/loaded")
+            || lower.hasSuffix("/bpm") || lower.hasSuffix("/playing")
+            || lower.hasSuffix("/loopinfo") || lower.hasSuffix("/temposliderenabled")
+            || lower.hasSuffix("/temposlider") || lower.hasSuffix("/sync") else { return }
+
+        let arguments = message.arguments.map { argument -> String in
+            switch argument {
+            case .int(let value): return "i:\(value)"
+            case .float(let value): return "f:\(String(format: "%.2f", value))"
+            case .string(let value): return "s:\(value)"
+            case .blob(let bytes): return "b:\(bytes.count)"
+            }
+        }.joined(separator: " ")
+        let key = message.address + "|" + arguments
+        guard loggedDeckMutations.insert(key).inserted, loggedDeckMutations.count <= 60 else { return }
+        logAsync(.info, "Deck ← \(message.address) \(arguments)")
+    }
+
+    /// Logs the session tempo the board receives, once a second at most.
+    private func logHeaderTempo(_ message: OSCMessage) {
+        guard message.address.lowercased().hasSuffix("/header/bpm") else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastHeaderTempoLog) >= 1 else { return }
+        lastHeaderTempoLog = now
+        let arguments = message.arguments.map { argument -> String in
+            switch argument {
+            case .int(let value): return "i:\(value)"
+            case .float(let value): return "f:\(String(format: "%.3f", value))"
+            case .string(let value): return "s:\(value)"
+            case .blob(let bytes): return "b:\(bytes.count)"
+            }
+        }.joined(separator: " ")
+        logAsync(.info, "Session tempo → board: \(arguments)")
+    }
+
+    /// Keep the last known title/BPM per deck on disk, so a restarted app or a
+    /// rebooted board can repopulate its cards without a track load.
+    private func observeDeckMetadata(_ message: OSCMessage) {
+        let lower = message.address.lowercased()
+        var changed = false
+        if lower.hasSuffix("/trackinfo") {
+            changed = deckMetadata.record(trackInfo: message)
+            logDeckMetadata(message)
+        } else if lower.hasSuffix("/loaded"), message.firstInt == 0,
+                  let deck = DeckMetadataCache.deckNumber(in: message.address) {
+            changed = deckMetadata.clear(deck: deck)
+        } else if lower.hasSuffix("/sync"), message.firstInt != nil,
+                  let deck = DeckMetadataCache.deckNumber(in: message.address) {
+            changed = deckMetadata.recordSync(deck: deck, synced: message.firstInt == 1)
+            // Turning SYNC on locks the deck to the header immediately; the
+            // board should not wait for a playhead update to show that tempo.
+            if message.firstInt == 1 { sendSyncedTempo(deck: deck, at: Date()) }
+        } else if lower.hasSuffix("/bpm"), message.firstFloat != nil,
+                  let deck = DeckMetadataCache.deckNumber(in: message.address) {
+            // The deck's live tempo, which a master tempo or pitch changes.
+            changed = deckMetadata.recordLiveBpm(deck: deck, bpm: Double(message.firstFloat ?? 0))
+        }
+        if changed { saveDeckMetadata() }
+    }
+
+    /// Logs every distinct track-related feedback address once. Titles are
+    /// change-only, so this is the quickest way to tell "the panel is broken"
+    /// from "Syndicate has not sent a track yet".
+    private func logTrackFeedback(_ packet: OSCPacket) {
+        for message in packet.messages {
+            let lower = message.address.lowercased()
+            guard lower.contains("/deck/") else { continue }
+            guard lower.contains("trackinfo") || lower.contains("title") || lower.contains("artist")
+                || lower.contains("load") || lower.contains("bpm") || lower.hasSuffix("/sync") else { continue }
+            guard loggedTrackAddresses.insert(lower).inserted else { continue }
+            guard loggedTrackAddresses.count <= 40 else { continue }
+            let strings = message.arguments.compactMap { argument -> String? in
+                if case .string(let value) = argument { return value }
+                return nil
+            }
+            logAsync(.info, "Track feedback \(message.address) [\(message.arguments.count) args] "
+                     + strings.prefix(3).joined(separator: " · "))
+        }
+    }
+
+    /// Syndicate only sends `TrackInfo` when a track is loaded, so the panels
+    /// stay blank until that happens. Logging it once per track makes that
+    /// obvious instead of looking like a broken display.
+    private func logDeckMetadata(_ message: OSCMessage) {
+        guard message.address.lowercased().hasSuffix("/trackinfo") else { return }
+        let strings = message.arguments.compactMap { argument -> String? in
+            if case .string(let value) = argument { return value }
+            return nil
+        }
+        let key = message.address + "|" + strings.joined(separator: "|")
+        guard loggedTracks.insert(key).inserted else { return }
+        if loggedTracks.count > 32 { loggedTracks.removeFirst() }
+        logAsync(.info, "Deck metadata \(message.address): \(strings.joined(separator: " · "))")
     }
 
     // MARK: - Diagnostics
@@ -623,21 +1129,29 @@ final class BridgeService {
         }
     }
 
-    private func logAutoPilotDiagnostics() {
-        autoPilot = AutoPilotSettings.detect()
-        guard let ap = autoPilot else {
-            log(.info, "AUTO/PILOT settings not found; using \(destination):\(destinationPort)")
+    private func logSyndicateDiagnostics() {
+        syndicate = SyndicateSettings.detect()
+        guard let ap = syndicate else {
+            log(.info, "Syndicate settings not found; using \(destination):\(destinationPort)")
             return
         }
         log(.info, ap.summary)
         if let listen = ap.listenPort, listen != destinationPort {
-            log(.warn, "Port mismatch: AUTO/PILOT listens on \(listen) but the bridge sends to \(destinationPort). Fix it in Settings.")
+            log(.warn, "Port mismatch: Syndicate listens on \(listen) but the bridge sends to \(destinationPort). Fix it in Settings.")
         }
         if !ap.oscEnabled {
-            log(.warn, "AUTO/PILOT OSC input is disabled (Settings → OSC). The bridge cannot reach it.")
+            log(.warn, "Syndicate OSC input is disabled (Settings → OSC). The bridge cannot reach it.")
         }
         if !ap.hasBridgeSubscriptions {
-            log(.warn, "AUTO/PILOT feedback subscribes to no deck/mixer paths (\(ap.subscriptionCount) subscriptions). Enable Toggle All feedback so CUE, toggles and LEDs work.")
+            log(.warn, "Syndicate feedback subscribes to no deck/mixer paths (\(ap.subscriptionCount) subscriptions). Enable Toggle All feedback so CUE, toggles and LEDs work.")
+        }
+        // Tempo and MASTER come from three specific subscriptions. Without them
+        // the cards stay blank however healthy the rest of the link looks.
+        let paths = Set(ap.feedbackPaths.map { $0.lowercased() })
+        let tempoRoutes = ["deck/1/bpm", "deck/1/sync", "deck/1/temposliderenabled"]
+        let missing = tempoRoutes.filter { route in !paths.contains { $0.hasSuffix("/" + route) } }
+        if !missing.isEmpty {
+            log(.warn, "Syndicate feedback is missing \(missing.joined(separator: ", ")). Tempo and the MASTER tag need Deck BPM, Sync and TempoSliderEnabled ticked in Settings → OSC FEEDBACK.")
         }
     }
 
@@ -653,10 +1167,13 @@ final class BridgeService {
             guard let self else { return }
             self.drain(self.engine.tick())
             let now = Date()
+            self.publishDeckState(at: now)
+            self.maintainSerialLink(at: now)
             if now.timeIntervalSince(self.lastRefresh) >= 2 {
                 self.lastRefresh = now
                 self.midi.refresh()
                 self.connectSerialIfNeeded(force: false)
+                self.refreshPodStrip(at: now)
             }
             if now.timeIntervalSince(self.lastPublish) >= 0.1 {
                 self.lastPublish = now
@@ -676,6 +1193,11 @@ final class BridgeService {
             ($0, latencyMonitor.stats($0))
         })
         let roundTrip = latencyMonitor.roundTrip
+        let linkRoundTrip = latencyMonitor.linkRoundTrip
+        let histories = Dictionary(uniqueKeysWithValues: LatencySource.allCases.map {
+            ($0, latencyMonitor.recent($0))
+        })
+        let linkHistory = latencyMonitor.recentLinkRoundTrips()
         let engineLearn = engine.learnState
         let passthrough = passthroughSent
         let serialFrames = serial.framesIn
@@ -688,11 +1210,14 @@ final class BridgeService {
             self.lastFeedback = feedback
             self.latency = latencies
             self.roundTrip = roundTrip
+            self.linkRoundTrip = linkRoundTrip
+            self.latencyHistory = histories
+            self.linkRoundTripHistory = linkHistory
             self.learnState = engineLearn
             self.serialFrames = serialFrames
             if accepted > 0 && !self.loggedFirstFeedback {
                 self.loggedFirstFeedback = true
-                self.log(.info, "Receiving AUTO/PILOT OSC feedback")
+                self.log(.info, "Receiving Syndicate OSC feedback")
             }
             self.onChange?()
         }
@@ -724,12 +1249,23 @@ final class BridgeService {
     }
 
     private func dispatch(_ message: OSCMessage, endpoint: OSCEndpoint?) {
-        if let endpoint {
-            osc.send(message, to: OSCDestination(host: endpoint.host, port: UInt16(endpoint.port)))
+        // The primary app may listen on a custom root or, on a pre-rename
+        // build, still on `/AutoPilot`; commands have to follow the detected
+        // root or they are discarded by the app that received them. Extra
+        // destinations keep their own prefixes untouched.
+        let outbound: OSCMessage
+        if endpoint == nil {
+            outbound = OSCMessage(HubRouter.retarget(message.address, root: syndicate?.addressRoot),
+                                  message.arguments)
         } else {
-            osc.send(message)
+            outbound = message
         }
-        let address = message.address.lowercased()
+        if let endpoint {
+            osc.send(outbound, to: OSCDestination(host: endpoint.host, port: UInt16(endpoint.port)))
+        } else {
+            osc.send(outbound)
+        }
+        let address = outbound.address.lowercased()
         if endpoint == nil && !address.hasSuffix("/feedback/resend") {
             latencyMonitor.expectFeedback(address: message.address)
         }
@@ -740,16 +1276,17 @@ final class BridgeService {
         }
         // Log the first send of every address — that is how a user sees
         // which control works — then throttle: faders can stream.
-        let unseen = loggedAddresses.insert(message.address).inserted
+        let sentAddress = outbound.address
+        let unseen = loggedAddresses.insert(sentAddress).inserted
         if first || unseen || oscLogCount % 25 == 0 {
             let target = endpoint.map { "\($0.label) \($0.host):\($0.port)" }
                 ?? "\(destination):\(destinationPort)"
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if first {
-                    self.log(.info, "Sending OSC to \(target) (first packet \(message.address))")
+                    self.log(.info, "Sending OSC to \(target) (first packet \(sentAddress))")
                 } else {
-                    self.log(.info, "OSC sent \(message.address) → \(target)")
+                    self.log(.info, "OSC sent \(sentAddress) → \(target)")
                 }
             }
         }
